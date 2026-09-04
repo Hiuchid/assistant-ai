@@ -209,24 +209,46 @@ The ladder runs *within* Groq. Limits are per-organization **and per model**, so
 model is its own quota bucket and they stack.** Order by quality, fall through on
 exhaustion:
 
-| Order | Model | Free limits (verify in console) | Notes |
-|---|---|---|---|
-| 1 | `openai/gpt-oss-120b` | 30 RPM · 1K RPD · 8K TPM · 200K TPD | Best quality of the free set. |
-| 2 | `openai/gpt-oss-20b` | 30 RPM · 1K RPD · 8K TPM · 200K TPD | Separate bucket from 120b. |
-| 3 | `qwen/qwen3.8-27b` | 30 RPM · 8K TPM | Separate bucket again. |
-| 4 | `groq/compound-mini` | 30 RPM · **70K TPM** | High TPM — for when concurrency, not daily volume, is binding. |
+**[r4] Order below is measured on this account, not assumed.** r3 ordered by presumed model
+quality and got it backwards. Median of 3 runs, realistic system prompt + one capture turn:
+
+| Order | Model | Limits (measured) | Median | Tok/turn | Notes |
+|---|---|---|---|---|---|
+| 1 | `qwen/qwen3.8-27b` | 1K req/day · 8K TPM | **87 ms** | **87** | Fastest and cheapest by a wide margin; replies fine for capture-and-route. |
+| 2 | `openai/gpt-oss-20b` | 1K req/day · 8K TPM | 188 ms | 153 | Separate quota bucket. Reasoning model — see below. |
+| 3 | `openai/gpt-oss-120b` | 1K req/day · 8K TPM | 323 ms | 157 | Best quality of the set; separate bucket again. |
+| 4 | `groq/compound-mini` | **250 req/day** · 70K TPM | 494 ms | **616** | Last resort. Injects a ~470-token agentic preamble, so a 168-token input costs 632. High TPM, tiny request budget. |
+
+**[r4] gpt-oss are reasoning models and will return empty replies if you get this wrong.**
+They emit reasoning tokens *before* content, and those count as completion tokens:
+
+- With `max_tokens=10` the whole budget went to reasoning; content came back `''` with
+  `finish_reason: length`. Silent, and easy to misdiagnose as a bad prompt.
+- **Always set `reasoning_effort: "low"`** on `gpt-oss-*` — it cut completion tokens from
+  69 to 25 for an identical answer.
+- `reasoning_effort: "none"` is **rejected**; only `low`, `medium`, `high` are accepted.
+- qwen and compound-mini are not reasoning models and need no such flag.
+
+**[r4] Groq sits behind Cloudflare and blocks unusual User-Agents** with `error code: 1010`.
+Python's default `Python-urllib/3.x` is blocked. Send a real `User-Agent`; `httpx` and the
+official SDK are fine.
 
 **[r3] The ladder is config-driven, not hardcoded.** A list of model IDs with their limits
 in `config.py`. Adding, removing or reordering a rung is a config edit. Since actual volume
 is unknown (§6), this is how we adapt without a refactor.
 
-**Verify these in the Groq console before building around them.** Limits are
-per-organization and the lineup moves: `llama-3.1-8b-instant`, named as r1's fallback,
-moved to Enterprise-only on 2026-08-26.
+**[r4] Verified available on this account 2026-09-04**: all four rungs plus
+`whisper-large-v3-turbo` for Phase 3. The lineup moves — `llama-3.1-8b-instant`, r1's named
+fallback, went Enterprise-only on 2026-08-26.
 
-**`groq/compound` and `compound-mini` are agentic system models** with built-in tool use.
-Confirm they behave as plain chat completions before relying on them, and disable built-in
-browsing.
+**[r4] Two other models on the account are worth knowing about:**
+
+- **`canopylabs/orpheus-v1-english`** — a **TTS model on Groq**. If usable it could replace
+  `edge-tts` outright: no CPU cost, no unofficial wrapper, no 403 risk, no additional
+  provider seeing our data. **Evaluate it first in Phase 2**, before building around
+  edge-tts. `orpheus-arabic-saudi` also exists — Saudi not Lebanese, but relevant to §14.
+- **`meta-llama/llama-prompt-guard-2-86m`** — a prompt-injection classifier, directly
+  relevant to the Phase 7 threat model.
 
 **Stream the response.** Non-negotiable for latency — see §7.
 
@@ -401,16 +423,36 @@ number and stop rather than shipping a slow widget.
 
 ## 6. **[r2] Quota budget, concurrency, and degraded mode
 
-### Per-conversation cost
+### Per-conversation cost — **[r4] measured, not assumed
 
-Assumptions — argue with these, they drive everything:
+r2/r3 estimated ~8,300 tokens per conversation from guesswork. Measured against the real
+ladder on 2026-09-04, it is **less than half that**, because a capture-and-route assistant
+gives very short replies and qwen's tokenizer is efficient:
 
-- 10-turn voice conversation, ~15 utterances
-- system prompt ~300 tokens; each turn resends the growing transcript
-- ~80 tokens per turn of history; ~50 output tokens per reply
-- one summarisation call: ~1,000 in / 200 out
+| | r3 estimate | r4 measured (qwen rung) |
+|---|---|---|
+| System prompt | 300 tok | ~60 tok |
+| Single turn, no history | — | 87 tok total (67 in / 20 out) |
+| 10-turn conversation | ~7,100 | **~3,350** |
+| Summarisation call | ~1,200 | ~750 |
+| **Per conversation** | **~8,300** | **~4,100** |
 
-**≈ 8,300 LLM tokens, ≈ 16 LLM requests, ≈ 15 STT requests per conversation.**
+Still an estimate for the multi-turn part — only single turns were measured — but the
+per-turn figures underpinning it are real. **Replace this table with observed numbers once
+there are two weeks of real traffic.**
+
+**≈ 4,100 LLM tokens, ≈ 11 LLM requests, ≈ 15 STT requests per conversation.**
+
+**Daily capacity** at 200K tokens/day per model (documented; the headers expose only the
+8K/min figure, so this one is still unverified):
+
+- Token-bound: 200,000 ÷ 4,100 ≈ **48 conversations/day per model**
+- Request-bound: 1,000 ÷ 11 ≈ 90/day per model — so tokens bind first
+- Stacked across the three cheap rungs: **~145 conversations/day**
+
+That is 3× the top of the stated 10–50/day target. The volume worry in r2 was real but has
+been resolved by measurement — quota is no longer the binding constraint at this scale.
+**§2's framing still holds directionally** (quota before CPU), but the headroom is large.
 
 ### **[r3] Volume is unknown — build for the ceiling, not a guess
 
