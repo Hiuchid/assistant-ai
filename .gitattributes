@@ -1,0 +1,10 @@
+# This repo is authored on Windows and deployed to Linux. Committing CRLF would
+# break shell scripts ("bad interpreter: /usr/bin/env bash^M"), the systemd unit
+# and the nginx configs. Normalise everything to LF in the repo.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.onnx  binary
+*.wav   binary
+*.mp3   binary
+*.png   binary

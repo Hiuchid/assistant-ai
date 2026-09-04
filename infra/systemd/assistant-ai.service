@@ -1,0 +1,42 @@
+[Unit]
+Description=Personal Voice & Chat Assistant (FastAPI)
+Documentation=file:///root/assistant-ai/INSTRUCTIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/root/assistant-ai
+EnvironmentFile=/root/assistant-ai/.env
+
+# --proxy-headers + --forwarded-allow-ips is what makes request.client.host the
+# real caller rather than nginx. Without it, per-IP rate limiting on the public
+# WebSocket collapses into a single shared bucket (INSTRUCTIONS.md §4.2).
+ExecStart=/root/assistant-ai/.venv/bin/uvicorn backend.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
+
+Restart=always
+RestartSec=3
+
+# TODO(hardening): this runs as root to match the existing garden-ai pattern
+# and because /root/assistant-ai is root-owned and /root is mode 700. A public
+# unauthenticated endpoint should not run as root. Moving to a dedicated
+# service user means relocating the tree out of /root — worth doing before the
+# visitor widget is shared with anyone.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# journald collects stdout; logging_setup.py already emits JSON lines.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=assistant-ai
+
+[Install]
+WantedBy=multi-user.target

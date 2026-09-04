@@ -1,0 +1,20 @@
+# Secrets — §3.4. Only .env.example is committed.
+.env
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Runtime artefacts
+audio_cache/
+*.log
+
+# Piper voice models are large binaries; fetched by deploy, not committed.
+voices/*.onnx
+voices/*.onnx.json
