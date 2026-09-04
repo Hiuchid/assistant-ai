@@ -373,6 +373,24 @@ PLAN-REVIEW.md
 Frontend stays buildless if possible — plain ES modules served by Pages. If a bundler
 becomes necessary, use Vite and commit built output to `gh-pages`.
 
+### **[r4] ⚠️ The local repo and the public repo are deliberately different
+
+- **Local `main`** — everything: backend, infra, docs, `deploy.sh`.
+- **Remote `Hiuchid/assistant-ai` `main`** — **`index.html` only.**
+
+The repo is public because GitHub Pages requires a paid plan for private repos, and
+`deploy.sh` and this document both contain the VPS address. Publishing them hands a map to
+a box that is being actively swept for `/web/.env` and phpunit RCE paths, and which still
+has root password auth enabled.
+
+**Therefore: never run `git push origin main`.** The two histories are unrelated so git
+would currently reject it, but that is an accident, not a safeguard. To update the
+published page, upload `frontend/index.html` through the GitHub web UI, or push only that
+file to a dedicated branch.
+
+Revisit once the security items in §13 are done — at that point publishing the whole repo
+is a reasonable call.
+
 **[r2] VAD asset footprint.** `@ricky0123/vad-web`'s ONNX model is ~1–2 MB, but that is not
 the download. It also requires `onnxruntime-web` WASM binaries, `.mjs` bindings and an
 audio worklet, all served from our origin — and the runtime dominates. **Measure total
@@ -640,7 +658,7 @@ conflict rather than pre-checking — the race is real.
 
 Each phase must be working and verified before starting the next.
 
-### Phase 0 — Plumbing **[r2: expanded] — ✅ DONE except the Pages origin**
+### Phase 0 — Plumbing **[r2: expanded] — ✅ DONE**
 
 DuckDNS pointed at the VPS. **[r4]** nginx server block + certbot TLS (**dry run first**,
 §2). FastAPI with `GET /health`. Static page on GitHub Pages calling it over HTTPS.
@@ -657,8 +675,12 @@ DuckDNS pointed at the VPS. **[r4]** nginx server block + certbot TLS (**dry run
 - Verified `/`-relative fetches of `.env` and source return 404 (the vhost is pure
   `proxy_pass` with no `root`, so nginx never touches the filesystem for it).
 
-**Still open:** `ALLOWED_ORIGINS` is empty pending the GitHub Pages origin, and the health
-page is not yet published to Pages.
+- **[r4]** Live at **https://hiuchid.github.io/assistant-ai/** — green, `env=prod`, and
+  `your ip` shows the real external address. `ALLOWED_ORIGINS=https://hiuchid.github.io`.
+- Verified the Pages origin receives `access-control-allow-origin` and a disallowed origin
+  does not. Note a disallowed origin still gets a 200 with a body — CORS is enforced by the
+  browser, not the server. **This is exactly why the Phase 1 WebSocket needs its own
+  `Origin` check (§3.5); the CORS middleware does not cover it.**
 
 **[r2] Added, because these are ten lines each and painful to retrofit:**
 
