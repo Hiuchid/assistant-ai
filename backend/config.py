@@ -4,8 +4,6 @@ Rule from INSTRUCTIONS.md §3.4: no defaults for secrets. Every secret declared
 here is required, and startup fails loudly if it is missing. Fields are added
 per phase rather than declared up front with placeholder values -- a config
 that lies about what it needs is worse than one that fails fast.
-
-Phase 0 needs no secrets at all.
 """
 
 from __future__ import annotations
@@ -13,8 +11,58 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+ReasoningEffort = Literal["low", "medium", "high"]
+
+
+class LadderRung(BaseModel):
+    """One model in the fallthrough ladder (§4)."""
+
+    model: str
+    # gpt-oss models emit reasoning tokens before content. Left unset they burn
+    # the completion budget and return an empty string with
+    # finish_reason=length -- silently. "low" is required on those; "none" is
+    # rejected by the API. qwen and compound are not reasoning models.
+    reasoning_effort: ReasoningEffort | None = None
+    requests_per_day: int
+    tokens_per_minute: int
+    note: str = ""
+
+
+# Ordered by measured latency and cost, not by presumed quality -- see §4.
+# This is the config point: reorder, add or drop rungs here. Phase 1.5 adds the
+# quota ledger that consults these limits before dispatch; Phase 1 only falls
+# through reactively on 429.
+DEFAULT_LADDER: tuple[LadderRung, ...] = (
+    LadderRung(
+        model="qwen/qwen3.8-27b",
+        requests_per_day=1000,
+        tokens_per_minute=8000,
+        note="87ms, 87 tok/turn measured -- fastest and cheapest",
+    ),
+    LadderRung(
+        model="openai/gpt-oss-20b",
+        reasoning_effort="low",
+        requests_per_day=1000,
+        tokens_per_minute=8000,
+        note="188ms, 153 tok/turn; separate quota bucket",
+    ),
+    LadderRung(
+        model="openai/gpt-oss-120b",
+        reasoning_effort="low",
+        requests_per_day=1000,
+        tokens_per_minute=8000,
+        note="323ms, 157 tok/turn; best quality of the set",
+    ),
+    LadderRung(
+        model="groq/compound-mini",
+        requests_per_day=250,
+        tokens_per_minute=70000,
+        note="last resort: ~470-token agentic preamble, only 250 req/day",
+    ),
+)
 
 
 class Settings(BaseSettings):
@@ -47,6 +95,31 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.1"]
     )
 
+    # ---- Phase 1: LLM ----
+    groq_api_key: str  # no default: required, fails loudly if absent
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+
+    # Groq sits behind Cloudflare and rejects unusual User-Agents with
+    # "error code: 1010". Python's default urllib UA is blocked outright.
+    user_agent: str = "assistant-ai/0.1"
+
+    llm_temperature: float = 0.3
+    llm_max_tokens: int = 400
+    llm_timeout_s: float = 30.0
+
+    # §6: derived from Groq's 20 RPM STT ceiling, not from CPU. Text costs no
+    # STT, so it runs higher. Voice arrives in Phase 3.
+    max_concurrent_text: int = 4
+
+    # §12: the public WebSocket is unauthenticated, on the open internet, and
+    # spends finite quota. Per-IP limits, not global.
+    ws_max_connections_per_ip: int = 3
+    ws_max_messages_per_minute: int = 20
+
+    # How long a conversation may sit idle before its in-memory state is
+    # dropped. Phase 4 replaces this with the database + sweeper.
+    session_idle_timeout_s: int = 900
+
     @field_validator("allowed_origins", "trusted_proxies", mode="before")
     @classmethod
     def _split_csv(cls, v: object) -> object:
@@ -73,6 +146,10 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def ladder(self) -> tuple[LadderRung, ...]:
+        return DEFAULT_LADDER
 
 
 @lru_cache(maxsize=1)

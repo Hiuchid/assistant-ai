@@ -11,7 +11,7 @@ import json
 import logging
 import sys
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # Set once per session; every log line emitted while handling that session
@@ -30,9 +30,9 @@ _RESERVED = frozenset(
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(timespec="milliseconds"),
+            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),

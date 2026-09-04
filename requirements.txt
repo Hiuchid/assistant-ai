@@ -1,6 +1,13 @@
-# Phase 0. Dependencies are added per phase rather than up front, so that
-# what is installed always reflects what is actually built.
+# Dependencies are added per phase rather than up front, so what is installed
+# always reflects what is actually built.
+
+# Phase 0
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
+
+# Phase 1 — Groq streaming over HTTP/2-capable async client, and the WebSocket
+# protocol implementation uvicorn uses for the /ws/chat endpoint.
+httpx==0.28.1
+websockets==14.1

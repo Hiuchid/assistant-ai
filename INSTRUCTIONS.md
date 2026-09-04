@@ -753,6 +753,27 @@ origin and confirming rejection.
 forcing a 429 on the top model falls through without dropping the turn; and a WS connection
 from an unlisted origin is refused.
 
+**[r4] ✅ DONE 2026-09-05.** All three criteria met:
+
+- Multi-turn conversation over `wss://` from the live Pages widget, streaming in 27–32
+  chunks per reply. **First token 89–146 ms**, well inside the §7 budget.
+- 429 fallthrough proven in `tests/test_llm_ladder.py` with a mocked rate-limited top rung —
+  along with total exhaustion, mid-stream failure *not* being retried, reasoning output
+  never reaching the client, and `reasoning_effort` being sent only to reasoning models.
+  5 tests, `ruff` and `mypy --strict` clean with **no ignores** (the pydantic mypy plugin
+  resolves `BaseSettings`' env-populated required fields properly).
+- A handshake from an unlisted `Origin` is refused with HTTP 403 before `accept()`.
+
+Also shipped: per-IP connection and message-rate limits, a global concurrency cap, the
+sliding transcript window, and idle-session eviction.
+
+**Known gaps, carried into Phase 1.5 and Phase 4:**
+
+- `LadderExhausted` currently returns an honest error to the visitor. §6's scripted no-LLM
+  capture path does not exist yet, so an exhausted ladder still loses the lead.
+- `Conversation.messages()` truncates rather than compresses — §6's running summary of
+  turns older than the window is not implemented, so early detail is simply forgotten.
+
 ### **[r2] Phase 1.5 — Quota ledger and degraded mode
 
 Build `quota.py` and `degraded.py`. Verify the ladder falls through on *predicted*

@@ -3,63 +3,186 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Assistant — Health</title>
+<title>Leave a message</title>
 <style>
-  :root { color-scheme: light dark; --ok:#137a4b; --bad:#b3261e; --fg:#1a1a1a; --bg:#fafaf8; --mut:#666; --line:#e0e0dc; }
-  @media (prefers-color-scheme: dark) {
-    :root { --ok:#4ade80; --bad:#f87171; --fg:#e8e8e6; --bg:#141416; --mut:#999; --line:#2a2a2e; }
+  :root {
+    color-scheme: light dark;
+    --bg:#faf9f7; --panel:#ffffff; --fg:#1b1b1a; --mut:#6b6b68; --line:#e6e4df;
+    --agent-bg:#f2f1ed; --user-bg:#1b1b1a; --user-fg:#faf9f7;
+    --ok:#137a4b; --bad:#b3261e; --accent:#1b1b1a;
   }
-  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg);
-         font:15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .card { width:min(90vw,440px); border:1px solid var(--line); border-radius:12px; padding:24px; }
-  h1 { margin:0 0 4px; font-size:17px; font-weight:600; }
-  .sub { color:var(--mut); font-size:13px; margin-bottom:20px; }
-  .row { display:flex; align-items:center; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
-  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); flex:none; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#131314; --panel:#1a1a1c; --fg:#e9e8e4; --mut:#98978f; --line:#2c2c2f;
+      --agent-bg:#232326; --user-bg:#e9e8e4; --user-fg:#131314;
+      --ok:#4ade80; --bad:#f87171; --accent:#e9e8e4;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; min-height:100dvh; background:var(--bg); color:var(--fg);
+    font:15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:grid; place-items:center; padding:16px;
+  }
+  .app {
+    width:min(100%, 560px); height:min(88dvh, 680px); background:var(--panel);
+    border:1px solid var(--line); border-radius:14px; display:flex; flex-direction:column;
+    overflow:hidden;
+  }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  header h1 { margin:0; font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--mut); flex:none; transition:background .2s; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
-  .k { color:var(--mut); font-size:13px; min-width:96px; }
-  .v { font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:13px; word-break:break-all; }
-  pre { margin:12px 0 0; padding:10px; background:color-mix(in srgb, var(--fg) 5%, transparent);
-        border-radius:6px; font-size:12px; overflow-x:auto; color:var(--bad); white-space:pre-wrap; }
+  .state { margin-left:auto; font-size:12px; color:var(--mut); }
+
+  #log { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:82%; padding:9px 13px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; }
+  .msg.agent { background:var(--agent-bg); border-bottom-left-radius:5px; align-self:flex-start; }
+  .msg.user  { background:var(--user-bg); color:var(--user-fg); border-bottom-right-radius:5px; align-self:flex-end; }
+  .msg.error { background:transparent; color:var(--bad); border:1px solid var(--bad); align-self:stretch; max-width:100%; font-size:13px; }
+  .meta { align-self:flex-start; font-size:11px; color:var(--mut); font-family:ui-monospace,Consolas,monospace; }
+
+  .cursor::after {
+    content:"▋"; margin-left:1px; opacity:.5; animation:blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity:0; } }
+
+  form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
+  input[type=text] {
+    flex:1; padding:10px 13px; border-radius:9px; border:1px solid var(--line);
+    background:var(--bg); color:var(--fg); font:inherit; min-width:0;
+  }
+  input[type=text]:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  button {
+    padding:10px 16px; border-radius:9px; border:0; background:var(--accent);
+    color:var(--panel); font:inherit; font-weight:550; cursor:pointer;
+  }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  @media (prefers-reduced-motion: reduce) { .cursor::after { animation:none; } }
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Personal Assistant</h1>
-    <div class="sub">Phase 0 — backend connectivity check</div>
-    <div class="row"><span class="dot" id="dot"></span><span class="k">status</span><span class="v" id="status">checking…</span></div>
-    <div class="row"><span class="dot"></span><span class="k">version</span><span class="v" id="version">—</span></div>
-    <div class="row"><span class="dot"></span><span class="k">env</span><span class="v" id="env">—</span></div>
-    <div class="row"><span class="dot"></span><span class="k">your ip</span><span class="v" id="ip">—</span></div>
-    <pre id="err" hidden></pre>
-  </div>
+<div class="app">
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>Leave a message</h1>
+    <span class="state" id="state">connecting…</span>
+  </header>
+  <div id="log" role="log" aria-live="polite"></div>
+  <form id="form" autocomplete="off">
+    <input type="text" id="input" placeholder="Type your message…" disabled
+           aria-label="Your message" maxlength="4000">
+    <button type="submit" id="send" disabled>Send</button>
+  </form>
+</div>
 
 <script type="module">
-// Phase 0 verifies three things at once: HTTPS reaches the backend, CORS is
-// configured for this exact origin, and nginx forwards the real client IP.
-// If `your ip` shows 127.0.0.1, proxy headers are misconfigured (§4.2).
-const API = "https://assistant-ai.duckdns.org";
+const WS_URL = "wss://assistant-ai.duckdns.org/ws/chat";
 
 const $ = (id) => document.getElementById(id);
+const log = $("log"), input = $("input"), send = $("send"), form = $("form");
+const dot = $("dot"), state = $("state");
 
-try {
-  const res = await fetch(`${API}/health`, { mode: "cors" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+let socket = null;
+let streaming = null;   // the agent bubble currently being written into
+let retryDelay = 1000;
 
-  $("dot").className = "dot ok";
-  $("status").textContent = data.status;
-  $("version").textContent = data.version;
-  $("env").textContent = data.env;
-  $("ip").textContent = data.client_ip ?? "unknown";
-} catch (e) {
-  $("dot").className = "dot bad";
-  $("status").textContent = "unreachable";
-  const err = $("err");
-  err.hidden = false;
-  err.textContent =
-    `${e}\n\nIf this is a CORS error, add this page's origin\n(${location.origin})\nto ALLOWED_ORIGINS in the backend .env and restart.`;
+function setState(text, cls) {
+  state.textContent = text;
+  dot.className = "dot" + (cls ? " " + cls : "");
 }
+
+function bubble(cls, text = "") {
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function setComposerEnabled(on) {
+  input.disabled = !on;
+  send.disabled = !on;
+  if (on) input.focus();
+}
+
+function connect() {
+  setState("connecting…");
+  socket = new WebSocket(WS_URL);
+
+  socket.onopen = () => {
+    retryDelay = 1000;
+    setState("connected", "ok");
+    setComposerEnabled(true);
+  };
+
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === "ready") {
+      // Nothing to show — the server is just handing us a conversation id.
+      return;
+    }
+    if (msg.type === "token") {
+      if (!streaming) {
+        streaming = bubble("agent");
+        streaming.classList.add("cursor");
+      }
+      streaming.textContent += msg.text;
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
+    if (msg.type === "done") {
+      if (streaming) streaming.classList.remove("cursor");
+      streaming = null;
+      // Latency and model are surfaced deliberately: §7 says we cannot tune
+      // what we cannot see, and this is the cheapest possible view of it.
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `${msg.model} · first token ${msg.first_token_ms}ms · total ${msg.total_ms}ms`;
+      log.appendChild(meta);
+      log.scrollTop = log.scrollHeight;
+      setComposerEnabled(true);
+      return;
+    }
+    if (msg.type === "error") {
+      if (streaming) streaming.classList.remove("cursor");
+      streaming = null;
+      bubble("error", msg.message);
+      setComposerEnabled(true);
+    }
+  };
+
+  socket.onclose = (event) => {
+    setComposerEnabled(false);
+    streaming = null;
+    // 1008 is the server refusing us on policy — a disallowed Origin, too many
+    // connections, or at capacity. Reconnecting would just be refused again.
+    if (event.code === 1008) {
+      setState("refused", "bad");
+      bubble("error", `Connection refused: ${event.reason || "policy"}`);
+      return;
+    }
+    setState("reconnecting…", "bad");
+    setTimeout(connect, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 15000);
+  };
+
+  socket.onerror = () => setState("connection error", "bad");
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
+  bubble("user", text);
+  socket.send(JSON.stringify({ type: "user_message", text }));
+  input.value = "";
+  setComposerEnabled(false);
+});
+
+connect();
 </script>
 </body>
 </html>
