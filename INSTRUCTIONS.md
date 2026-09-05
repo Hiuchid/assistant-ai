@@ -1165,4 +1165,35 @@ ready. Before committing:
   is likely needed, at some accuracy cost.
 - The persona prompts (§5) would need translating, not just the voice swapping.
 
-Do not build this speculatively. Revisit as a scoped addition once English works end to end.
+**[r5] ✅ BUILT 2026-09-05, and the r3 caveats were right on every count.**
+
+Measured against Groq Whisper before building anything, as this section asked:
+
+| | Result |
+|---|---|
+| Plain Lebanese | **Near-perfect.** `بدي` (Levantine, not MSA) transcribed correctly. |
+| Spoken numbers | **Better than expected** — returned as digits, `70123456`. |
+| Code-switching | **Broken.** `quote` → `كووت`, `printing` → `البرينتنغ`, `please` → `تبليز`. |
+
+**Nothing fixes code-switching at the transcription step.** Forcing English wrecks the
+Arabic; auto-detect picks Arabic anyway. But the model reads straight through it once told
+what is happening — given the mangling as an example, it recovered "a price quote for a
+printing job" from text where it had otherwise guessed "coding" and "Rogin". That hint is
+~60 tokens and lives in `prompts/visitor_ar.py`.
+
+**Language is detected from the first utterance**, not chosen from a menu: a caller who
+opens in Lebanese is answered in Lebanese. After that it is pinned, because Whisper drifts
+on short clips. A toggle in the widget overrides it, and the server always answers with
+what it actually chose so the UI cannot disagree with the prompt and voice in use.
+
+**Voice: `ar-LB-RamiNeural`** via edge-tts — genuinely Lebanese. The Arabic profile has no
+Fish entry, so the chain skips to edge-tts: Fish has no Lebanese model, and a British
+butler reading Arabic would be worse than no voice at all.
+
+**The prompt is Levantine, not MSA.** A caller who says `بدي` and gets formal Modern
+Standard Arabic back hears a government office, not someone's assistant.
+
+**Items are generated in English regardless of the call's language**, with contact details
+kept verbatim. Verified: a full Lebanese call produced `Sami from Al-Arz Company requested
+a callback regarding an invoice`, contact `{name: Sami, phone: 70123456}`. The owner reads
+one language; the transcript keeps the original.

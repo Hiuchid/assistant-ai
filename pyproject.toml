@@ -8,6 +8,13 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# RUF001-003 flag characters that could be confused with Latin ones -- a good
+# rule for a homoglyph slipped into an identifier, and meaningless in a file
+# whose entire content is deliberately Arabic. Scoped to that one file so the
+# check keeps working everywhere it means something.
+"backend/prompts/visitor_ar.py" = ["RUF001", "RUF002", "RUF003"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -17,6 +17,8 @@
   <header>
     <span class="dot" id="dot"></span>
     <h1>Leave a message</h1>
+    <button type="button" id="lang" class="icon"
+            title="التحويل إلى العربية">ع</button>
     <button type="button" id="mic" class="icon" aria-pressed="false"
             title="Talk instead of typing">🎤</button>
     <button type="button" id="mute" class="icon" aria-pressed="false"
@@ -33,6 +35,9 @@
   <p class="notice">
     Messages are recorded and passed to the person you're contacting.
     Transcripts are deleted after 90 days.
+    <span dir="rtl" style="display:block;margin-top:4px">
+      بتنسجل الرسايل وبتوصل للشخص المعني. التسجيلات بتنمحى بعد ٩٠ يوم.
+    </span>
   </p>
 </div>
 
@@ -57,6 +62,11 @@ startWidget({
     state: document.getElementById("state"),
     mic: document.getElementById("mic"),
     mute: document.getElementById("mute"),
+    lang: document.getElementById("lang"),
+  },
+  strings: {
+    enPlaceholder: "Type your message…",
+    arPlaceholder: "اكتب رسالتك…",
   },
 });
 </script>

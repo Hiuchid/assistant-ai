@@ -35,6 +35,9 @@ MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 class Transcript:
     text: str
     stt_ms: float
+    # What Whisper thinks it heard. Used to switch a conversation into Arabic
+    # on the first utterance rather than making the caller find a toggle.
+    language: str = "en"
 
 
 class STTUnavailable(RuntimeError):
@@ -59,7 +62,10 @@ class GroqWhisper:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def transcribe(self, audio: bytes, *, mime: str = "audio/webm") -> Transcript:
+    async def transcribe(
+        self, audio: bytes, *, mime: str = "audio/webm",
+        language: str | None = None,
+    ) -> Transcript:
         if not audio:
             raise STTUnavailable("empty audio")
         if len(audio) > MAX_UPLOAD_BYTES:
@@ -72,11 +78,13 @@ class GroqWhisper:
                 files={"file": ("utterance.webm", audio, mime)},
                 data={
                     "model": self._model,
-                    # Pinning the language stops Whisper hallucinating a
-                    # translation on short or noisy clips. §14 revisits this
-                    # when Arabic arrives -- code-switching needs auto-detect.
-                    "language": self._language,
-                    "response_format": "json",
+                    # Pinned once the conversation's language is known, and
+                    # omitted before that so Whisper detects it. Pinning stops
+                    # it hallucinating a translation on short clips; detecting
+                    # first is what lets an Arabic caller be answered in
+                    # Arabic without hunting for a toggle (§14).
+                    **({"language": language} if language else {}),
+                    "response_format": "verbose_json",
                     # Whisper invents plausible-sounding speech for silence.
                     # Temperature 0 makes that less likely, not impossible --
                     # the caller still filters empty-ish results.
@@ -96,11 +104,16 @@ class GroqWhisper:
                 raise STTUnavailable(f"stt rate limited: {detail}")
             raise STTUnavailable(f"stt HTTP {response.status_code}: {detail}")
 
-        text = str(response.json().get("text", "")).strip()
+        body = response.json()
+        text = str(body.get("text", "")).strip()
+        # verbose_json names the language in full ("Arabic"), not as a code.
+        detected = str(body.get("language", "")).lower()
+        code = "ar" if detected.startswith("arab") else "en"
         log.info(
             "stt complete",
-            extra={"stt_ms": round(stt_ms), "chars": len(text), "bytes": len(audio)},
+            extra={"stt_ms": round(stt_ms), "chars": len(text),
+                   "bytes": len(audio), "language": code},
         )
         if not text:
             raise STTUnavailable("no speech detected")
-        return Transcript(text=text, stt_ms=stt_ms)
+        return Transcript(text=text, stt_ms=stt_ms, language=code)

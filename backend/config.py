@@ -117,6 +117,19 @@ VISITOR_VOICE = VoiceProfile(
 )
 
 
+# §14: Lebanese, not MSA. edge-tts ships a genuine ar-LB pair, so a caller who
+# speaks Levantine is answered in Levantine rather than in a newsreader accent.
+#
+# Fish has no Lebanese model, so this profile has no "fish" entry -- the chain
+# skips straight to edge-tts for Arabic, which is the right outcome: a British
+# butler reading Arabic would be worse than no voice at all.
+ARABIC_VOICE = VoiceProfile(
+    label="visitor-ar",
+    voices={"edge": "ar-LB-RamiNeural", "piper": ""},
+    prosody=Prosody(rate="-4%"),
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -260,6 +273,9 @@ class Settings(BaseSettings):
     # Pinned rather than auto-detected: Whisper hallucinates translations on
     # short clips otherwise. §14 revisits this for Arabic, where mid-sentence
     # code-switching makes a single forced language the wrong answer.
+    # §14: forced per conversation once the language is known. Left as None
+    # for the first utterance so Whisper detects it -- measured accurate on
+    # Lebanese, which is what decides whether the caller gets Arabic at all.
     stt_language: str = "en"
     stt_timeout_s: float = 30.0
 

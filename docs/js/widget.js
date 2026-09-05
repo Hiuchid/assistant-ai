@@ -21,7 +21,7 @@ const SPEECH_ONSET_FRAMES = 3;     // x 50 ms poll = ~150 ms sustained
 const POLL_MS = 50;
 
 export function startWidget({ wsUrl, sessionToken = "", tokenKey, el,
-                             consentNotice = "" }) {
+                             consentNotice = "", strings = {} }) {
   let socket = null;
   let streaming = null;      // the agent bubble currently being written into
   let retryDelay = 1000;
@@ -48,6 +48,25 @@ export function startWidget({ wsUrl, sessionToken = "", tokenKey, el,
   const storeToken = (t) => {
     try { sessionStorage.setItem(tokenKey, t); } catch { /* private mode */ }
   };
+
+  // Arabic changes the reading direction and the placeholder, but nothing
+  // else -- the server decides the language, and it tells us what it chose
+  // whether that came from the toggle or from what it heard.
+  let lang = "en";
+  function setLanguage(next) {
+    if (next === lang) return;
+    lang = next;
+    const rtl = lang === "ar";
+    el.log.dir = rtl ? "rtl" : "ltr";
+    el.input.dir = rtl ? "rtl" : "ltr";
+    el.input.placeholder = rtl
+      ? (strings.arPlaceholder || "اكتب رسالتك…")
+      : (strings.enPlaceholder || el.input.placeholder);
+    if (el.lang) {
+      el.lang.textContent = rtl ? "EN" : "ع";
+      el.lang.title = rtl ? "Switch to English" : "التحويل إلى العربية";
+    }
+  }
 
   function setState(text, cls) {
     el.state.textContent = text;
@@ -254,6 +273,9 @@ export function startWidget({ wsUrl, sessionToken = "", tokenKey, el,
         case "mode":
           if (el.mode) el.mode.textContent = msg.mode;
           return;
+        case "lang":
+          setLanguage(msg.lang);
+          return;
         case "resumed":
           el.log.innerHTML = "";
           for (const t of msg.turns) {
@@ -359,6 +381,14 @@ export function startWidget({ wsUrl, sessionToken = "", tokenKey, el,
   }
   function recordConsent() {
     try { sessionStorage.setItem(CONSENT_KEY, "1"); } catch { /* private mode */ }
+  }
+
+  if (el.lang) {
+    el.lang.addEventListener("click", () => {
+      // Asks the server; it answers with a "lang" message either way, so the
+      // UI never disagrees with the prompt and voice actually in use.
+      send({ type: "set_lang", lang: lang === "ar" ? "en" : "ar" });
+    });
   }
 
   el.mic.addEventListener("click", async () => {

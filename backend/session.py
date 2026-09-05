@@ -46,6 +46,9 @@ class Conversation:
     system_prompt: str
     channel: Literal["text", "voice"] = "text"
     mode: Literal["owner", "visitor"] = "visitor"
+    # Set from the first utterance Whisper transcribes, or by the
+    # widget toggle. Drives the prompt, the voice and the STT hint.
+    lang: Literal["en", "ar"] = "en"
     turns: list[Turn] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)

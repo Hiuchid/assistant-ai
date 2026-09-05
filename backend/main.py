@@ -37,13 +37,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
 from . import auth, resume
-from .config import OWNER_VOICE, VISITOR_VOICE, Settings, get_settings
+from .config import (
+    ARABIC_VOICE,
+    OWNER_VOICE,
+    VISITOR_VOICE,
+    Settings,
+    get_settings,
+)
 from .degraded import ALL_FIXED_LINES, DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
 from .notify import Notifier
 from .persistence import Store
 from .prompts.owner import OWNER_SYSTEM_PROMPT
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT, visitor_prompt
+from .prompts.visitor_ar import arabic_visitor_prompt
 from .providers.llm import (
     Completed,
     LadderExhausted,
@@ -346,6 +353,8 @@ class ClientMessage(BaseModel):
     # Session token from /auth/login, for type="hello". Its absence, or any
     # failure to verify it, leaves the caller a visitor.
     session: str = ""
+    # "en" or "ar", for type="set_lang".
+    lang: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -686,6 +695,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if incoming.type == "set_lang":
+                await _set_language(conversation, incoming.lang)
+                await websocket.send_json({"type": "lang", "lang": conversation.lang})
+                continue
+
             if incoming.type == "hello":
                 # §3.7: mode is derived from a verified session, never from
                 # anything the client asserts. There is no "mode" field in the
@@ -735,7 +749,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                     holds_voice_slot = True
                     conversation.channel = "voice"
 
-                text = await _transcribe(websocket, incoming)
+                text = await _transcribe(websocket, incoming, conversation)
                 if text is None:
                     continue
             else:
@@ -931,7 +945,9 @@ def _report_turn_failure(task: asyncio.Task[None]) -> None:
         log.error("turn failed", extra={"error": repr(exc)}, exc_info=exc)
 
 
-async def _transcribe(websocket: WebSocket, incoming: ClientMessage) -> str | None:
+async def _transcribe(
+    websocket: WebSocket, incoming: ClientMessage, conversation: Conversation
+) -> str | None:
     """Turn an uploaded utterance into text, or None if it was not speech."""
     try:
         audio = base64.b64decode(incoming.data, validate=True)
@@ -941,7 +957,10 @@ async def _transcribe(websocket: WebSocket, incoming: ClientMessage) -> str | No
 
     try:
         transcript: Transcript = await websocket.app.state.stt.transcribe(
-            audio, mime=incoming.mime
+            audio, mime=incoming.mime,
+            # Unset on the first utterance so Whisper detects; pinned after,
+            # which stops it drifting mid-conversation on a short clip.
+            language=conversation.lang if conversation.turns else None,
         )
     except STTUnavailable as e:
         # Silence, noise, or a rate limit. Say nothing rather than inventing a
@@ -949,6 +968,12 @@ async def _transcribe(websocket: WebSocket, incoming: ClientMessage) -> str | No
         log.warning("transcription failed", extra={"error": str(e)[:200]})
         await websocket.send_json({"type": "not_heard"})
         return None
+
+    # The first utterance decides the language, so a caller who opens in
+    # Lebanese is answered in Lebanese without hunting for a toggle.
+    if not conversation.turns and transcript.language != conversation.lang:
+        await _set_language(conversation, transcript.language)
+        await websocket.send_json({"type": "lang", "lang": conversation.lang})
 
     # Echo it back so the caller sees what was heard, which is the only way to
     # notice a misrecognition before it ends up in the ticket.
@@ -1016,12 +1041,42 @@ async def _visitor_system_prompt() -> str:
 
 
 def _voice_for(conversation: Conversation) -> VoiceProfile:
-    """§1: owner and visitor hear different voices.
+    """§1: owner and visitor hear different voices; Arabic gets its own.
 
-    Mode is set server-side from verified auth (§3.7), never from the
-    client, so this cannot be steered by a caller asking nicely.
+    Mode is set server-side from verified auth (§3.7), never from the client,
+    so this cannot be steered by a caller asking nicely. Language can be, and
+    that is fine -- picking which language you are answered in is not a
+    privilege.
     """
-    return OWNER_VOICE if conversation.mode == "owner" else VISITOR_VOICE
+    if conversation.mode == "owner":
+        return OWNER_VOICE
+    return ARABIC_VOICE if conversation.lang == "ar" else VISITOR_VOICE
+
+
+async def _set_language(conversation: Conversation, lang: str) -> None:
+    """Switch a visitor conversation into Arabic or back.
+
+    The system prompt is rebuilt rather than translated: a Lebanese caller
+    should hear Levantine phrasing, not English sentences rendered in Arabic.
+    Owner mode is left alone -- Jarvis has one voice.
+    """
+    if lang not in ("en", "ar") or conversation.mode == "owner":
+        return
+    if conversation.lang == lang:
+        return
+    conversation.lang = lang  # type: ignore[assignment]
+
+    store: Store | None = app.state.store
+    briefing = ""
+    if store is not None:
+        try:
+            briefing = await store.get_setting("visitor_briefing")
+        except Exception as e:
+            log.error("could not load briefing", extra={"error": repr(e)})
+    conversation.system_prompt = (
+        arabic_visitor_prompt(briefing) if lang == "ar" else visitor_prompt(briefing)
+    )
+    log.info("conversation language set", extra={"lang": lang})
 
 
 async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str) -> None:
