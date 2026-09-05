@@ -2,113 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Assistant</title>
-<link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<meta name="theme-color" content="#131314">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Assistant">
-<link rel="stylesheet" href="css/app.css">
+<!-- The owner chat moved into the owner app as a module. Kept as a redirect so
+     bookmarks, the old manifest shortcuts and anything already installed
+     keep working rather than 404ing. -->
+<meta http-equiv="refresh" content="0; url=app.html">
+<link rel="canonical" href="app.html">
 </head>
-<body class="centred">
-
-<div class="login" id="login">
-  <h1>Sign in</h1>
-  <p>Owner access. Visitors should use the public page.</p>
-  <form id="loginForm" autocomplete="on">
-    <label for="email">Email</label>
-    <input type="email" id="email" required autocomplete="username">
-    <label for="password">Password</label>
-    <input type="password" id="password" required autocomplete="current-password">
-    <button type="submit" class="primary" id="loginBtn">Sign in</button>
-    <div class="err" id="loginErr" role="alert"></div>
-  </form>
-</div>
-
-<div class="app" id="app" hidden>
-  <header>
-    <span class="dot" id="dot"></span>
-    <h1>Assistant</h1>
-    <span class="state" id="mode"></span>
-    <button type="button" id="mic" class="icon" aria-pressed="false"
-            title="Talk instead of typing">🎤</button>
-    <button type="button" id="mute" class="icon" aria-pressed="false"
-            title="Mute the voice">🔊</button>
-    <span class="state" id="state">connecting…</span>
-  </header>
-  <div id="log" role="log" aria-live="polite"></div>
-  <form id="form" class="composer" autocomplete="off">
-    <input type="text" id="input" placeholder="Type…" disabled
-           aria-label="Your message" maxlength="4000">
-    <button type="submit" id="send" class="primary" disabled>Send</button>
-  </form>
-</div>
-
-<script type="module">
-import { startWidget } from "./js/widget.js";
-
-const API = "https://assistant-ai.duckdns.org";
-const SESSION_KEY = "assistant.session";
-
-const $ = (id) => document.getElementById(id);
-
-function launch(token) {
-  $("login").hidden = true;
-  $("app").hidden = false;
-  startWidget({
-    wsUrl: "wss://assistant-ai.duckdns.org/ws/chat",
-    sessionToken: token,
-    tokenKey: "assistant.resume.owner",
-    el: {
-      log: $("log"), input: $("input"), send: $("send"), form: $("form"),
-      dot: $("dot"), state: $("state"), mic: $("mic"), mute: $("mute"),
-      mode: $("mode"),
-    },
-  });
-}
-
-$("loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const err = $("loginErr");
-  err.textContent = "";
-  $("loginBtn").disabled = true;
-  try {
-    const res = await fetch(`${API}/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: $("email").value, password: $("password").value }),
-    });
-    if (!res.ok) {
-      // The server returns the same 401 for unknown email and wrong password,
-      // so there is nothing more specific to say here either.
-      err.textContent = res.status === 429
-        ? "Too many attempts. Wait a minute."
-        : "Those details were not accepted.";
-      return;
-    }
-    const { token } = await res.json();
-    // sessionStorage, not localStorage: this is a bearer credential and should
-    // die with the tab rather than persist on a shared machine.
-    try { sessionStorage.setItem(SESSION_KEY, token); } catch { /* private mode */ }
-    launch(token);
-  } catch {
-    err.textContent = "Could not reach the server.";
-  } finally {
-    $("loginBtn").disabled = false;
-  }
-});
-
-// Skip the form if this tab already signed in. An expired token simply comes
-// back as visitor mode, which the header will show.
-let existing = "";
-try { existing = sessionStorage.getItem(SESSION_KEY) || ""; } catch { /* ignore */ }
-if (existing) launch(existing);
-</script>
-<script type="module">
-import { registerServiceWorker } from "./js/pwa.js";
-registerServiceWorker();
-</script>
+<body>
+<p>Moved to <a href="app.html">the app</a>.</p>
+<script>location.replace("app.html");</script>
 </body>
 </html>

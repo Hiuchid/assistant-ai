@@ -9,7 +9,10 @@
   "orientation": "portrait-primary",
   "background_color": "#131314",
   "theme_color": "#131314",
-  "categories": ["productivity", "utilities"],
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
   "icons": [
     {
       "src": "icons/icon-192.png",
@@ -33,15 +36,25 @@
   "shortcuts": [
     {
       "name": "Talk to the assistant",
-      "short_name": "Assistant",
-      "url": "assistant.html",
-      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+      "short_name": "Talk",
+      "url": "app.html",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
     },
     {
       "name": "Inbox",
       "short_name": "Inbox",
-      "url": "dashboard.html",
-      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+      "url": "app.html",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
     }
   ]
 }

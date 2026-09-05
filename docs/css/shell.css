@@ -1,0 +1,295 @@
+/* Owner app shell.
+ *
+ * Same shape as the gardening app: a phone-width frame centred on desktop,
+ * a gradient header, and a bottom tab bar switching between modules. Tokens
+ * follow that app's scale so the two feel like siblings rather than cousins.
+ *
+ * Deliberately its own stylesheet rather than an extension of app.css: the
+ * visitor widget is a single-purpose page and should not inherit an
+ * application chrome it has no use for.
+ */
+
+:root {
+  --bg: #0e1220;
+  --page: #070a14;
+  --surface: #171d2e;
+  --surface-2: #212a3f;
+  --border: #2c3550;
+
+  --text: #e6e9f3;
+  --text-dim: #a7b0c7;
+  --text-faint: #8b95ad;
+
+  --primary: #4a63b8;
+  --primary-soft: #94a9f0;
+  --primary-strong: #3a4f96;
+  --on-primary: #f2f5ff;
+
+  --bubble-ai: #1a2133;
+  --bubble-user-1: #4a5fae;
+  --bubble-user-2: #37478a;
+  --bubble-user-text: #eff2fd;
+
+  --danger: #ef7f76;
+  --warn: #d9a94f;
+  --ok: #6fce9f;
+  --info: #74b6ee;
+
+  --header-grad-1: #1e2748;
+  --header-grad-2: #131a33;
+  --nav-bg: rgba(15, 20, 34, 0.86);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
+
+  --fs-caption-2: .6875rem;
+  --fs-caption: .75rem;
+  --fs-footnote: .8125rem;
+  --fs-subhead: .875rem;
+  --fs-callout: .9375rem;
+  --fs-body: 1rem;
+  --fs-headline: 1.0625rem;
+  --fs-title-3: 1.125rem;
+  --fs-title: 1.3125rem;
+  --fs-large-title: 1.75rem;
+
+  --shadow-2: 0 2px 6px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.45);
+  --tap: 44px;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font: var(--fs-body)/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+}
+
+/* The frame. On a phone it fills the screen; on desktop it stays phone-width
+   so the layout is designed once rather than twice. */
+.shell {
+  width: min(100%, 430px);
+  height: 100dvh;
+  max-height: 100dvh;
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  overflow: hidden;
+  position: relative;
+}
+@media (min-width: 480px) and (min-height: 720px) {
+  .shell { height: min(92dvh, 860px); border-radius: var(--r-xl); box-shadow: var(--shadow-2); }
+}
+
+/* ---------- header ---------- */
+.appbar {
+  background: linear-gradient(180deg, var(--header-grad-1), var(--header-grad-2));
+  padding: calc(var(--sp-3) + env(safe-area-inset-top)) var(--sp-4) var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-3);
+}
+.appbar .title { flex: 1; text-align: center; }
+.appbar .title b {
+  display: block; font-size: var(--fs-headline); font-weight: 650;
+  letter-spacing: -.01em;
+}
+.appbar .title span { display: block; font-size: var(--fs-caption); color: var(--text-dim); }
+.iconbtn {
+  width: var(--tap); height: var(--tap); flex: none;
+  display: grid; place-items: center;
+  background: none; border: 0; color: var(--text-dim);
+  border-radius: var(--r-sm); cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.iconbtn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.iconbtn:active { transform: scale(.93); }
+.iconbtn svg { width: 21px; height: 21px; }
+
+.subbar {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+.subbar h1 {
+  margin: 0; font-size: var(--fs-title-3); font-weight: 650;
+  letter-spacing: -.015em; flex: 1;
+  display: flex; align-items: center; gap: var(--sp-2);
+}
+.subbar h1 svg { width: 18px; height: 18px; color: var(--primary-soft); }
+
+/* ---------- module area ---------- */
+.views { overflow-y: auto; overscroll-behavior: contain; }
+.view { display: none; padding: var(--sp-4); }
+.view.active { display: block; }
+.view.flush { padding: 0; }
+
+.greeting { font-size: var(--fs-large-title); font-weight: 650; letter-spacing: -.022em; margin: var(--sp-2) 0 2px; }
+.greeting-sub { color: var(--text-dim); font-size: var(--fs-subhead); margin: 0 0 var(--sp-5); }
+
+.section-label {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-caption); font-weight: 650; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-faint);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+.section-label .count {
+  background: var(--surface-2); color: var(--text-dim);
+  border-radius: 999px; padding: 1px 7px; font-size: var(--fs-caption-2);
+  letter-spacing: 0;
+}
+
+.card {
+  background: var(--surface); border: 1px solid transparent;
+  border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+  display: flex; align-items: center; gap: var(--sp-3);
+  margin-bottom: var(--sp-2); width: 100%; text-align: left;
+  color: inherit; font: inherit; cursor: pointer;
+  transition: background .12s, transform .12s var(--ease-out);
+}
+.card:active { transform: scale(.99); }
+.card:hover { background: var(--surface-2); }
+.card.static { cursor: default; }
+.card.static:active { transform: none; }
+.card .chip-icon {
+  width: 32px; height: 32px; flex: none; border-radius: var(--r-sm);
+  background: var(--surface-2); display: grid; place-items: center;
+  color: var(--primary-soft);
+}
+.card .chip-icon svg { width: 17px; height: 17px; }
+.card .body { flex: 1; min-width: 0; }
+.card .body b { display: block; font-size: var(--fs-callout); font-weight: 600; }
+.card .body span { display: block; font-size: var(--fs-footnote); color: var(--text-dim); }
+.card .trail { color: var(--text-faint); flex: none; display: grid; place-items: center; }
+.card .trail svg { width: 18px; height: 18px; }
+
+.pillrow { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-4); }
+.pill {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--primary-soft); border-radius: 999px;
+  padding: 9px 15px; font-size: var(--fs-footnote); font-weight: 550;
+  cursor: pointer; font-family: inherit;
+}
+.pill:hover { background: var(--surface-2); }
+.pill:active { transform: scale(.97); }
+.pill[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.pill svg { width: 15px; height: 15px; }
+.pill:disabled { opacity: .5; cursor: not-allowed; }
+
+.empty { text-align: center; color: var(--text-faint); padding: var(--sp-8) var(--sp-4); font-size: var(--fs-subhead); }
+
+/* ---------- items ---------- */
+.item { background: var(--surface); border-radius: var(--r-md); padding: var(--sp-4); margin-bottom: var(--sp-2); }
+.item h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-callout); font-weight: 650; }
+.item .meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; font-size: var(--fs-caption); color: var(--text-faint); }
+.item p { margin: var(--sp-2) 0 0; font-size: var(--fs-footnote); color: var(--text-dim); }
+.tag { font-size: var(--fs-caption-2); padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+.tag.high { color: var(--danger); border-color: var(--danger); }
+.tag.medium { color: var(--warn); border-color: var(--warn); }
+.tag.owner { color: var(--primary-soft); border-color: var(--primary-strong); }
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.contact { display: flex; gap: var(--sp-4); flex-wrap: wrap; margin-top: var(--sp-3); font-size: var(--fs-footnote); }
+.contact i { font-style: normal; color: var(--text-faint); }
+.contact b { font-weight: 550; }
+ul.todo { margin: var(--sp-3) 0 0; padding-left: 18px; font-size: var(--fs-footnote); color: var(--text-dim); }
+details.tr { margin-top: var(--sp-3); }
+details.tr summary { cursor: pointer; color: var(--text-faint); font-size: var(--fs-caption); }
+details.tr .line { font-size: var(--fs-footnote); margin: var(--sp-2) 0; color: var(--text-dim); }
+details.tr .line b { color: var(--text); font-weight: 550; }
+.actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); flex-wrap: wrap; }
+
+/* ---------- chat ---------- */
+.log { padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); }
+.msg { max-width: 84%; padding: 10px 14px; border-radius: var(--r-lg); white-space: pre-wrap; word-wrap: break-word; font-size: var(--fs-callout); }
+.msg.agent { background: var(--bubble-ai); align-self: flex-start; border-bottom-left-radius: var(--r-sm); }
+.msg.user {
+  background: linear-gradient(180deg, var(--bubble-user-1), var(--bubble-user-2));
+  color: var(--bubble-user-text); align-self: flex-end; border-bottom-right-radius: var(--r-sm);
+}
+.msg.error { background: transparent; border: 1px solid var(--danger); color: var(--danger); align-self: stretch; max-width: 100%; font-size: var(--fs-footnote); }
+.msgmeta { align-self: flex-start; font-size: var(--fs-caption-2); color: var(--text-faint); font-family: ui-monospace, Consolas, monospace; }
+.cursor::after { content: "▋"; margin-left: 1px; opacity: .5; animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.composer {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--border); background: var(--bg);
+}
+.composer input {
+  flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 11px 16px; color: var(--text); font: inherit;
+  font-size: var(--fs-callout);
+}
+.composer input:focus { outline: none; border-color: var(--primary); }
+.send {
+  width: 40px; height: 40px; flex: none; border: 0; border-radius: 50%;
+  background: var(--primary); color: var(--on-primary);
+  display: grid; place-items: center; cursor: pointer;
+}
+.send:disabled { opacity: .4; cursor: not-allowed; }
+.send svg { width: 18px; height: 18px; }
+#mic.live { color: var(--danger); }
+#mic.hearing { animation: pulse .8s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+/* ---------- bottom nav ---------- */
+.tabs {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  background: var(--nav-bg); backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tab {
+  background: none; border: 0; color: var(--text-faint); cursor: pointer;
+  padding: var(--sp-2) 0 var(--sp-3); font: inherit;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+}
+.tab .puck {
+  width: 46px; height: 26px; border-radius: 999px;
+  display: grid; place-items: center;
+  transition: background .16s var(--ease-out);
+}
+.tab svg { width: 19px; height: 19px; }
+.tab small { font-size: var(--fs-caption-2); letter-spacing: .01em; }
+.tab[aria-selected="true"] { color: var(--primary-soft); }
+.tab[aria-selected="true"] .puck { background: rgba(74, 99, 184, .22); }
+.tab .badge {
+  position: absolute; transform: translate(13px, -9px);
+  background: var(--danger); color: #2a0e0c; font-size: 10px; font-weight: 700;
+  border-radius: 999px; min-width: 16px; padding: 0 4px; line-height: 16px;
+}
+
+/* ---------- login ---------- */
+.login-view { display: grid; place-items: center; height: 100dvh; padding: var(--sp-5); }
+.login-card { width: min(100%, 340px); }
+.login-card h1 { font-size: var(--fs-title); margin: 0 0 var(--sp-1); letter-spacing: -.02em; }
+.login-card p { color: var(--text-dim); font-size: var(--fs-subhead); margin: 0 0 var(--sp-5); }
+.login-card label { display: block; font-size: var(--fs-caption); color: var(--text-faint); margin: var(--sp-3) 0 var(--sp-1); }
+.login-card input {
+  width: 100%; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 12px 14px; color: var(--text); font: inherit;
+}
+.login-card input:focus { outline: none; border-color: var(--primary); }
+.btn-primary {
+  width: 100%; margin-top: var(--sp-5); border: 0; border-radius: var(--r-md);
+  background: var(--primary); color: var(--on-primary);
+  padding: 13px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.err { color: var(--danger); font-size: var(--fs-footnote); margin-top: var(--sp-3); min-height: 1.2em; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor::after, #mic.hearing { animation: none; }
+  * { transition: none !important; }
+}

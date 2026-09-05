@@ -5,7 +5,7 @@
 // WebSocket -- with no network there is nothing to say and nothing to show, so
 // pretending otherwise would only produce a convincing but useless shell.
 
-const CACHE = "assistant-v1";
+const CACHE = "assistant-v2";
 
 // The shell only. Never cache API responses: a stale inbox that looks current
 // is worse than one that admits it cannot load.
@@ -13,10 +13,12 @@ const SHELL = [
   "./",
   "./index.html",
   "./message.html",
-  "./assistant.html",
-  "./dashboard.html",
+  "./app.html",
   "./css/app.css",
+  "./css/shell.css",
   "./js/widget.js",
+  "./js/app.js",
+  "./js/pwa.js",
   "./manifest.json",
   "./icons/icon-192.png",
 ];
