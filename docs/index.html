@@ -34,9 +34,13 @@
   .dot { width:8px; height:8px; border-radius:50%; background:var(--mut); flex:none; transition:background .2s; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
   .state { font-size:12px; color:var(--mut); }
-  .icon { margin-left:auto; background:none; border:0; padding:2px 6px; font-size:15px;
+  .icon { background:none; border:0; padding:2px 6px; font-size:15px;
           cursor:pointer; line-height:1; opacity:.85; }
+  #mic { margin-left:auto; }
   .icon:hover { opacity:1; }
+  #mic.live { opacity:1; color:var(--bad); }
+  #mic.hearing { animation:pulse .8s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
   .icon[aria-pressed="true"] { opacity:.4; }
 
   #log { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
@@ -70,6 +74,8 @@
   <header>
     <span class="dot" id="dot"></span>
     <h1>Leave a message</h1>
+    <button type="button" id="mic" class="icon" aria-pressed="false"
+            title="Talk instead of typing">🎤</button>
     <button type="button" id="mute" class="icon" aria-pressed="false"
             title="Mute the voice">🔊</button>
     <span class="state" id="state">connecting…</span>
@@ -179,6 +185,24 @@ function connect() {
       // Nothing to show — the server is just handing us a conversation id.
       return;
     }
+    if (msg.type === "interrupted") {
+      // Server cancelled the reply because we started talking over it.
+      stopAudio();
+      if (streaming) streaming.classList.remove("cursor");
+      streaming = null;
+      setComposerEnabled(true);
+      return;
+    }
+    if (msg.type === "transcript") {
+      // Echoed back so a misrecognition is visible before it reaches a ticket.
+      bubble("user", msg.text);
+      return;
+    }
+    if (msg.type === "not_heard") {
+      setState(listening ? "listening" : "connected", "ok");
+      setComposerEnabled(true);
+      return;
+    }
     if (msg.type === "audio") {
       enqueueAudio(msg);
       return;
@@ -243,7 +267,6 @@ form.addEventListener("submit", (e) => {
   setComposerEnabled(false);
 });
 
-const mute = $("mute");
 mute.addEventListener("click", () => {
   muted = !muted;
   mute.textContent = muted ? "🔇" : "🔊";
@@ -252,7 +275,139 @@ mute.addEventListener("click", () => {
   if (muted) stopAudio();
 });
 
-connect();
-</script>
+// ---- voice input -------------------------------------------------------
+// Energy-based endpointing rather than a neural VAD. @ricky0123/vad-web needs
+// onnxruntime's wasm, measured at 13.3 MB raw / 4.75 MB gzipped -- four times
+// the budget §3.2 allows for a widget that must load on mobile data. An
+// AnalyserNode costs nothing and is adequate in a normal room; if it proves
+// flaky in noise, Silero can be lazy-loaded on first mic use.
+let listening = false;
+let micStream = null;
+let recorder = null;
+let analyser = null;
+let chunks = [];
+let speaking = false;          // caller is currently talking
+let silenceSince = 0;
+let noiseFloor = 0.01;
+let pollTimer = null;
+
+const SILENCE_HANGOVER_MS = 900;   // quiet this long ends the utterance
+const MIN_UTTERANCE_MS = 400;      // shorter than this is a cough, not speech
+const SPEECH_MARGIN = 2.5;         // times the measured noise floor
+let speechStartedAt = 0;
+
+function rms() {
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  return Math.sqrt(sum / buf.length);
+}
+
+async function startListening() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  ensureAudio();
+  const source = audioCtx.createMediaStreamSource(micStream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+
+  // Calibrate against the actual room rather than a guessed constant.
+  const samples = [];
+  for (let i = 0; i < 12; i++) {
+    samples.push(rms());
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  noiseFloor = Math.max(0.005, samples.sort()[Math.floor(samples.length / 2)]);
+
+  listening = true;
+  micBtn.classList.add("live");
+  micBtn.setAttribute("aria-pressed", "true");
+  setState("listening", "ok");
+  pollTimer = setInterval(poll, 50);
+}
+
+function stopListening() {
+  listening = false;
+  clearInterval(pollTimer);
+  if (recorder && recorder.state === "recording") recorder.stop();
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  micStream = null; recorder = null; analyser = null; speaking = false;
+  micBtn.classList.remove("live", "hearing");
+  micBtn.setAttribute("aria-pressed", "false");
+  setState("connected", "ok");
+}
+
+function poll() {
+  if (!analyser) return;
+  const level = rms();
+  const loud = level > noiseFloor * SPEECH_MARGIN;
+
+  if (loud && !speaking) {
+    speaking = true;
+    speechStartedAt = Date.now();
+    micBtn.classList.add("hearing");
+    // Barge-in (§7.4): kill playback immediately, and tell the server before
+    // the audio upload so it can cancel the LLM and TTS work in flight.
+    if (playing || audioQueue.length) {
+      stopAudio();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "barge_in" }));
+      }
+    }
+    chunks = [];
+    recorder = new MediaRecorder(micStream, { mimeType: "audio/webm;codecs=opus" });
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = sendUtterance;
+    recorder.start();
+    silenceSince = 0;
+  } else if (!loud && speaking) {
+    if (!silenceSince) silenceSince = Date.now();
+    if (Date.now() - silenceSince > SILENCE_HANGOVER_MS) {
+      speaking = false;
+      micBtn.classList.remove("hearing");
+      const spoken = Date.now() - speechStartedAt - SILENCE_HANGOVER_MS;
+      if (recorder && recorder.state === "recording") {
+        recorder.stop();
+        if (spoken < MIN_UTTERANCE_MS) chunks = [];   // too short to be speech
+      }
+    }
+  } else if (loud && speaking) {
+    silenceSince = 0;
+  }
+}
+
+async function sendUtterance() {
+  if (!chunks.length) return;
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  chunks = [];
+  // Groq bills a 10-second minimum per request, so a fragment costs the same
+  // as a sentence. Drop the ones that are obviously not speech.
+  if (blob.size < 2000) return;
+  const b64 = await new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result.split(",")[1]);
+    fr.readAsDataURL(blob);
+  });
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    setState("transcribing…", "ok");
+    socket.send(JSON.stringify({ type: "audio", data: b64, mime: "audio/webm" }));
+  }
+}
+
+const micBtn = $("mic");
+micBtn.addEventListener("click", async () => {
+  try {
+    if (listening) stopListening();
+    else await startListening();
+  } catch (e) {
+    bubble("error", "Could not access the microphone: " + e.message);
+    stopListening();
+  }
+});
+
+const mute = $("mute");
 </body>
 </html>

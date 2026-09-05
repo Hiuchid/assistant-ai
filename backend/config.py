@@ -188,6 +188,20 @@ class Settings(BaseSettings):
     tts_breaker_failures: int = 3
     tts_breaker_cooldown_s: float = 300.0
 
+    # ---- Phase 3: voice input ----
+    stt_model: str = "whisper-large-v3-turbo"
+    # Pinned rather than auto-detected: Whisper hallucinates translations on
+    # short clips otherwise. §14 revisits this for Arabic, where mid-sentence
+    # code-switching makes a single forced language the wrong answer.
+    stt_language: str = "en"
+    stt_timeout_s: float = 30.0
+
+    # §6: derived from Groq's 20 requests/minute STT ceiling, not from CPU.
+    # An engaged speaker produces ~9 utterances/minute, so two concurrent voice
+    # sessions is the real ceiling. Re-derive if Groq's limits change, then
+    # check CPU -- it should not be tighter, but measure rather than assume.
+    max_concurrent_voice: int = 2
+
     piper_binary: Path = Path(".venv/bin/piper")
     piper_model: Path = Path("voices/en_GB-alan-medium.onnx")
     piper_timeout_s: float = 60.0

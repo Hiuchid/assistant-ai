@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -32,6 +34,7 @@ from .providers.llm import (
     StreamInterrupted,
     Token,
 )
+from .providers.stt import GroqWhisper, STTUnavailable, Transcript
 from .providers.tts.base import Audio, TTSBackend, TTSUnavailable, VoiceProfile
 from .providers.tts.cache import AudioCache
 from .providers.tts.edge import EdgeTTS
@@ -56,12 +59,18 @@ connections = ConnectionLimiter(
     per_ip=settings.ws_max_connections_per_ip,
     total=settings.max_concurrent_text,
 )
+# §6: voice is capped separately and far lower. The binding constraint is
+# Groq's 20 transcriptions/minute account-wide, not CPU -- an engaged speaker
+# generates ~9 utterances/minute, so two concurrent voice sessions is the
+# ceiling. A session becomes "voice" the first time it sends audio.
+voice_sessions = ConnectionLimiter(per_ip=1, total=settings.max_concurrent_voice)
 messages_limiter = MessageRateLimiter(per_minute=settings.ws_max_messages_per_minute)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ladder = GroqLadder(settings)
+    app.state.stt = GroqWhisper(settings)
 
     # Chain in descending quality, ascending reliability (§4). Fish is skipped
     # entirely when no key is configured, so the service still speaks.
@@ -114,6 +123,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sweeper.cancel()
         warm.cancel()
         await app.state.ladder.aclose()
+        await app.state.stt.aclose()
         if app.state.fish is not None:
             await app.state.fish.aclose()
 
@@ -195,6 +205,9 @@ async def health(request: Request) -> HealthResponse:
 class ClientMessage(BaseModel):
     type: str
     text: str = ""
+    # base64 webm/opus from MediaRecorder, for type="audio"
+    data: str = ""
+    mime: str = "audio/webm"
 
 
 @app.websocket("/ws/chat")
@@ -219,6 +232,24 @@ async def ws_chat(websocket: WebSocket) -> None:
     conversation_id_var.set(conversation.id)
     log.info("ws connected", extra={"client_ip": ip})
 
+    turn: asyncio.Task[None] | None = None
+    holds_voice_slot = False
+
+    async def cancel_turn() -> None:
+        """Barge-in (§7.4): stop the reply the moment they start talking."""
+        nonlocal turn
+        if turn is None or turn.done():
+            return
+        turn.cancel()
+        # Awaiting a task we just cancelled is *expected* to raise; there
+        # is nothing to report, unlike a genuine except-pass.
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+        # Tell the client to drop whatever audio it has queued. Without this it
+        # keeps playing sentences the caller has already talked over.
+        await websocket.send_json({"type": "interrupted"})
+        log.info("turn cancelled by barge-in")
+
     try:
         await websocket.send_json(
             {"type": "ready", "conversation_id": conversation.id}
@@ -233,18 +264,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
-            if incoming.type != "user_message":
-                await websocket.send_json(
-                    {"type": "error", "message": f"unknown type {incoming.type!r}"}
-                )
+            # Sent the instant the client detects speech, before the audio
+            # itself arrives, so playback stops without waiting for the upload.
+            if incoming.type == "barge_in":
+                await cancel_turn()
                 continue
 
-            text = incoming.text.strip()
-            if not text:
-                continue
-            if len(text) > 4000:
+            if incoming.type not in ("user_message", "audio"):
                 await websocket.send_json(
-                    {"type": "error", "message": "message too long"}
+                    {"type": "error", "message": f"unknown type {incoming.type!r}"}
                 )
                 continue
 
@@ -255,13 +283,80 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
-            await _handle_turn(websocket, conversation_id=conversation.id, text=text)
+            # Anything new supersedes the reply in flight.
+            await cancel_turn()
+
+            if incoming.type == "audio":
+                if not holds_voice_slot:
+                    if refusal := voice_sessions.try_acquire(ip):
+                        # §6: the pre-rendered hold line, not an error -- the
+                        # cap exists to protect Groq's STT budget, and the
+                        # caller should not be made to feel it.
+                        log.warning("voice refused", extra={"reason": refusal})
+                        await _say(
+                            websocket, conversation,
+                            ["I'm sorry, could you hold for just a moment?"],
+                            model="capacity-hold",
+                        )
+                        continue
+                    holds_voice_slot = True
+                    conversation.channel = "voice"
+
+                text = await _transcribe(websocket, incoming)
+                if text is None:
+                    continue
+            else:
+                text = incoming.text.strip()
+
+            if not text:
+                continue
+            if len(text) > 4000:
+                await websocket.send_json(
+                    {"type": "error", "message": "message too long"}
+                )
+                continue
+
+            turn = asyncio.create_task(
+                _handle_turn(websocket, conversation_id=conversation.id, text=text)
+            )
+            await turn
 
     except WebSocketDisconnect:
         log.info("ws disconnected", extra={"client_ip": ip})
+    except asyncio.CancelledError:
+        raise
     finally:
+        if turn is not None and not turn.done():
+            turn.cancel()
+        if holds_voice_slot:
+            voice_sessions.release(ip)
         connections.release(ip)
         sessions.drop(conversation.id)
+
+
+async def _transcribe(websocket: WebSocket, incoming: ClientMessage) -> str | None:
+    """Turn an uploaded utterance into text, or None if it was not speech."""
+    try:
+        audio = base64.b64decode(incoming.data, validate=True)
+    except (ValueError, binascii.Error):
+        await websocket.send_json({"type": "error", "message": "malformed audio"})
+        return None
+
+    try:
+        transcript: Transcript = await websocket.app.state.stt.transcribe(
+            audio, mime=incoming.mime
+        )
+    except STTUnavailable as e:
+        # Silence, noise, or a rate limit. Say nothing rather than inventing a
+        # turn out of it -- Whisper hallucinates plausible speech for silence.
+        log.warning("transcription failed", extra={"error": str(e)[:200]})
+        await websocket.send_json({"type": "not_heard"})
+        return None
+
+    # Echo it back so the caller sees what was heard, which is the only way to
+    # notice a misrecognition before it ends up in the ticket.
+    await websocket.send_json({"type": "transcript", "text": transcript.text})
+    return transcript.text
 
 
 async def _say(
