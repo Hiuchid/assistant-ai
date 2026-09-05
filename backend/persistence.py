@@ -68,9 +68,26 @@ class Store:
     async def __aexit__(self, *_: object) -> None:
         await self.close()
 
+    @staticmethod
+    async def _init_connection(conn: asyncpg.Connection[Any]) -> None:
+        """Decode jsonb to Python objects rather than raw strings.
+
+        Without this asyncpg hands back the JSON *text*, so action_items
+        arrives as '["a","b"]' and anything iterating it gets characters --
+        which is exactly how it failed: `.map is not a function` in the
+        dashboard, and contact silently rendering as indexed letters.
+        """
+        await conn.set_type_codec(
+            "jsonb",
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(
             self._dsn,
+            init=self._init_connection,
             min_size=self._min_size,
             max_size=self._max_size,
             command_timeout=10.0,
@@ -253,12 +270,12 @@ class Store:
             insert into tickets (conversation_id, mode, type, title, summary,
                                  intent, action_items, urgency, contact,
                                  requested_slot, due_at)
-            values ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11)
+            values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             on conflict (conversation_id) do nothing
             returning id
             """,
             conversation_id, mode, type, title, summary, intent,
-            json.dumps(action_items), urgency, json.dumps(contact), requested_slot,
+            action_items, urgency, contact, requested_slot,
             due_at,
         )
         return row is not None
