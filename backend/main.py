@@ -340,7 +340,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    # Every verb the API actually serves, listed rather than "*".
+    #
+    # This was GET and POST only, which silently broke every other verb from
+    # the browser: the preflight was refused, so marking a message triaged,
+    # saving the standing instructions, cancelling an event and deleting
+    # anything all failed before they left the page. Nothing showed in the
+    # server log, because nothing reached the server -- the button simply did
+    # nothing, which is how it was reported.
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
