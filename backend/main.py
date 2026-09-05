@@ -316,10 +316,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
+            # Deliberately not awaited: the receive loop has to stay
+            # responsive, or a barge_in cannot be read until the very turn it
+            # is meant to cancel has already finished.
             turn = asyncio.create_task(
                 _handle_turn(websocket, conversation_id=conversation.id, text=text)
             )
-            await turn
+            turn.add_done_callback(_report_turn_failure)
 
     except WebSocketDisconnect:
         log.info("ws disconnected", extra={"client_ip": ip})
@@ -332,6 +335,18 @@ async def ws_chat(websocket: WebSocket) -> None:
             voice_sessions.release(ip)
         connections.release(ip)
         sessions.drop(conversation.id)
+
+
+def _report_turn_failure(task: asyncio.Task[None]) -> None:
+    """Surface exceptions from the un-awaited turn task.
+
+    A fire-and-forget task swallows its exception unless someone looks, and the
+    caller would just see the assistant stop replying.
+    """
+    if task.cancelled():
+        return
+    if (exc := task.exception()) is not None:
+        log.error("turn failed", extra={"error": repr(exc)}, exc_info=exc)
 
 
 async def _transcribe(websocket: WebSocket, incoming: ClientMessage) -> str | None:
@@ -438,6 +453,7 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
     sender = asyncio.create_task(_send_audio_in_order(websocket, audio_queue))
 
     profile = _voice_for(conversation)
+    cancelled = False
 
     def speak(sentence: str) -> None:
         audio_queue.put_nowait(
@@ -483,11 +499,19 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
         await websocket.send_json(
             {"type": "error", "message": "That reply got cut off. Say that again?"}
         )
+    except asyncio.CancelledError:
+        # Barge-in. Abandon queued synthesis rather than draining it: §7.4 wants
+        # the in-flight work cancelled, and audio nobody will hear still costs
+        # Fish Audio quota and the caller's bandwidth.
+        cancelled = True
+        raise
     finally:
-        # Closes the queue on every path, including the exception ones, so the
-        # sender task can never outlive the turn that created it.
-        audio_queue.put_nowait(None)
-        await sender
+        if cancelled:
+            sender.cancel()
+        else:
+            audio_queue.put_nowait(None)
+        with contextlib.suppress(asyncio.CancelledError):
+            await sender
 
 
 async def _send_audio_in_order(
@@ -503,28 +527,41 @@ async def _send_audio_in_order(
     sequence number and the payload atomically together.
     """
     seq = 0
-    while True:
-        task = await queue.get()
-        if task is None:
-            return
-        seq += 1
-        try:
-            audio = await task
-        except TTSUnavailable as e:
-            # Both backends failed. The text already reached the client, so the
-            # turn is not lost -- it is simply silent.
-            log.error(
-                "synthesis failed for sentence",
-                extra={"seq": seq, "error": str(e)[:200]},
+    pending: list[asyncio.Task[Audio]] = []
+    try:
+        while True:
+            task = await queue.get()
+            if task is None:
+                return
+            pending.append(task)
+            seq += 1
+            try:
+                audio = await task
+            except TTSUnavailable as e:
+                # Both backends failed. The text already reached the client, so the
+                # turn is not lost -- it is simply silent.
+                log.error(
+                    "synthesis failed for sentence",
+                    extra={"seq": seq, "error": str(e)[:200]},
+                )
+                continue
+            await websocket.send_json(
+                {
+                    "type": "audio",
+                    "seq": seq,
+                    "mime": audio.mime,
+                    "data": base64.b64encode(audio.data).decode("ascii"),
+                }
             )
-            continue
-        except asyncio.CancelledError:
-            raise
-        await websocket.send_json(
-            {
-                "type": "audio",
-                "seq": seq,
-                "mime": audio.mime,
-                "data": base64.b64encode(audio.data).decode("ascii"),
-            }
-        )
+
+    finally:
+        # Barge-in cancels this task. Anything still synthesising is audio
+        # nobody will hear, so stop paying for it (§7.4). The queue is drained
+        # too, since tasks may have been enqueued after the last get().
+        while not queue.empty():
+            leftover = queue.get_nowait()
+            if leftover is not None:
+                pending.append(leftover)
+        for outstanding in pending:
+            if not outstanding.done():
+                outstanding.cancel()
