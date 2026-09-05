@@ -981,6 +981,10 @@ Jarvis system prompt, owner prosody profile, cap exemption and quota priority fr
 or `reminder`; a request with no JWT lands in visitor mode; and a request with a forged or
 expired JWT is refused rather than silently downgraded.
 
+**[r5] ✅ DONE 2026-09-05**, with JWT replaced by first-party sessions (§2b). Verified: no
+session → visitor, **forged session → visitor**, valid session → owner, and an owner
+conversation produced `type='reminder'`. `docs/assistant.html` is the owner widget.
+
 ### Phase 5 — Item generation
 
 The summarizer from §9, wired to session end and the inactivity sweeper, branching on mode.
@@ -1024,6 +1028,24 @@ to local disk with 7-day retention.
 **Done when:** an item created in one browser appears in the dashboard in another without a
 refresh, a non-operator account sees nothing through both direct queries and Realtime, and a
 dump file exists on disk.
+
+**[r5] ✅ DONE 2026-09-05.**
+
+- `docs/dashboard.html`, reading through our own API. **Not Supabase Realtime** — the
+  browser holds no Supabase credential now (§2b), so it polls every 8 s instead. New items
+  appear without a refresh, which is what the criterion actually asks for.
+- "A non-operator sees nothing" is now stronger than the criterion: **nobody** can read
+  through Supabase at all. RLS with zero policies denies every role but the backend, and
+  every API route requires a verified session — unauthenticated and forged-bearer requests
+  both return 401.
+- `pg_dump` verified: 5 tables, all data captured. **Needed `postgresql-client-17`** —
+  pg_dump 16 refuses a 17.6 server outright, and the first run failed on exactly that.
+- The backup script rejects a dump under 1 KB: one that succeeds but captures nothing looks
+  perfectly fine in a directory listing, which is the worst way to discover it.
+
+**[r5] Ops caveat worth acting on eventually:** the VPS holds both the service and its only
+backup. That is one failure away from losing both, and the free tier has no backups of its
+own. Moving the dumps off-box is worth doing before this holds anything you would miss.
 
 ### Phase 7 — Claude CLI worker — **NOT YET**
 
