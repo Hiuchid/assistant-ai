@@ -63,7 +63,7 @@ decision to reopen this.
 | Frontend | GitHub Pages | Static only. No server-side rendering, no secrets. |
 | Backend | Contabo VPS | 4 vCPU, 8 GB RAM, 100 GB disk. **No GPU.** |
 | Database | Supabase free tier | Postgres + Auth + Realtime |
-| **[r3]** Backend DNS | DuckDNS | `assistant-ai.duckdns.org` → `109.199.116.38` |
+| **[r3]** Backend DNS | DuckDNS | `assistant-ai.duckdns.org` → the VPS (address not recorded here; this repo is public) |
 | **[r4]** Reverse proxy | **nginx** (not Caddy) | Already on the box. See below. |
 
 ### **[r4] The VPS is not empty — nginx replaces Caddy
@@ -372,7 +372,7 @@ Log cache hit rate at INFO.
   test_quota.py           [r2] ladder + exhaustion, mocked 429s and clock
   test_auth.py            [r3] mode derivation: forged/expired/absent JWT never yields owner
   test_summarize.py       [r2] schema validation, malformed-response fallback
-/frontend
+/docs                     [r5] GitHub Pages serves from here, not the repo root
   index.html              visitor widget
   assistant.html          [r3] owner widget (auth-gated)
   dashboard.html          operator view
@@ -395,23 +395,22 @@ PLAN-REVIEW.md
 Frontend stays buildless if possible — plain ES modules served by Pages. If a bundler
 becomes necessary, use Vite and commit built output to `gh-pages`.
 
-### **[r4] ⚠️ The local repo and the public repo are deliberately different
+### **[r5] The whole repo is public — keep the host out of it
 
-- **Local `main`** — everything: backend, infra, docs, `deploy.sh`.
-- **Remote `Hiuchid/assistant-ai` `main`** — **`index.html` only.**
+Superseded the r4 split, where the public repo held only `index.html`. Everything is now
+published, so the rule changed rather than disappeared:
 
-The repo is public because GitHub Pages requires a paid plan for private repos, and
-`deploy.sh` and this document both contain the VPS address. Publishing them hands a map to
-a box that is being actively swept for `/web/.env` and phpunit RCE paths, and which still
-has root password auth enabled.
+**The VPS address must never be committed.** `deploy.sh` reads it from `ASSISTANT_HOST` and
+fails loudly if unset; this document refers to "the VPS" rather than an address. The box is
+actively swept for `/web/.env` and phpunit RCE paths and still has root password auth
+enabled (§13), so publishing the address would hand scanners a target.
 
-**Therefore: never run `git push origin main`.** The two histories are unrelated so git
-would currently reject it, but that is an accident, not a safeguard. To update the
-published page, upload `frontend/index.html` through the GitHub web UI, or push only that
-file to a dedicated branch.
+Before committing, check: `git grep -nE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'` should return
+nothing but documentation examples. The same goes for the DuckDNS token, the Groq key and
+anything else in `.env` — which is gitignored and must stay that way.
 
-Revisit once the security items in §13 are done — at that point publishing the whole repo
-is a reasonable call.
+**[r5] GitHub Pages serves `/docs`, not the repo root**, so the widget lives in `docs/`.
+Branch-based Pages only supports the root or `/docs`; `frontend/` would not work.
 
 **[r2] VAD asset footprint.** `@ricky0123/vad-web`'s ONNX model is ~1–2 MB, but that is not
 the download. It also requires `onnxruntime-web` WASM binaries, `.mjs` bindings and an
@@ -707,7 +706,7 @@ DuckDNS pointed at the VPS. **[r4]** nginx server block + certbot TLS (**dry run
 
 **[r4] Completed 2026-09-04:**
 
-- `assistant-ai.duckdns.org` → `109.199.116.38`, refreshed 6-hourly by cron.
+- `assistant-ai.duckdns.org` → the VPS, refreshed 6-hourly by cron.
 - nginx block with WebSocket directives; certbot cert valid to 2026-12-03, auto-renewing.
   garden-ai verified unaffected.
 - systemd unit `assistant-ai`, enabled at boot, uvicorn with `--proxy-headers`.

@@ -9,7 +9,9 @@
 
 set -euo pipefail
 
-HOST="${ASSISTANT_HOST:-root@109.199.116.38}"
+# Not baked in: this repo is public. Set it in your shell or a local
+# untracked file, e.g. export ASSISTANT_HOST=root@203.0.113.10
+HOST="${ASSISTANT_HOST:?set ASSISTANT_HOST, e.g. root@your.vps.example}"
 KEY="${ASSISTANT_KEY:-$HOME/.ssh/assistant_ai}"
 REMOTE="/root/assistant-ai"
 SSH=(ssh -i "$KEY" -o BatchMode=yes "$HOST")
