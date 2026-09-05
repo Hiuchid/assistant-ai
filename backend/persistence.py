@@ -35,6 +35,12 @@ Role = Literal["customer", "agent"]
 Mode = Literal["owner", "visitor"]
 Channel = Literal["text", "voice"]
 
+# How long after a conversation ends it can still be picked back up, so a
+# reconnect continues the same call rather than starting a second one. Longer
+# than the resume token's own hour would be pointless; long enough that a
+# caller who closes the tab and comes straight back is still the same message.
+RESUME_GRACE_MINUTES = 15
+
 
 @dataclass(frozen=True)
 class StoredTurn:
@@ -265,11 +271,22 @@ class Store:
         requested_slot: str | None,
         due_at: datetime | None = None,
     ) -> bool:
-        """Insert the item. False means one already existed.
+        """Write the item. False means one already existed and was left alone.
 
-        §9 asks for idempotency. `on conflict do nothing` against the unique
-        constraint is what provides it -- checking first would lose the race
-        between session-end and the sweeper, which genuinely happens.
+        §9 asks for idempotency, and the unique constraint on conversation_id
+        provides it: session-end racing the sweeper cannot make two items.
+
+        It refreshes rather than doing nothing, though. A conversation can be
+        reopened now (see claim_for_resume), so the same conversation is
+        genuinely summarised twice -- once when the socket dropped, once when
+        the caller had actually finished -- and the second summary is the one
+        that has read the whole thing.
+
+        The refresh stops at anything a human has touched. If the item has been
+        triaged, or archived, or had a reminder hung on it, it is left exactly
+        as it is: a late re-summary must never quietly undo someone's triage.
+        An existing due_at survives regardless, because that is a decision, not
+        a description.
         """
         row = await self.pool.fetchrow(
             """
@@ -277,14 +294,27 @@ class Store:
                                  intent, action_items, urgency, contact,
                                  requested_slot, due_at)
             values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            on conflict (conversation_id) do nothing
-            returning id
+            on conflict (conversation_id) do update
+               set type = excluded.type,
+                   title = excluded.title,
+                   summary = excluded.summary,
+                   intent = excluded.intent,
+                   action_items = excluded.action_items,
+                   urgency = excluded.urgency,
+                   contact = excluded.contact,
+                   requested_slot = excluded.requested_slot,
+                   due_at = coalesce(tickets.due_at, excluded.due_at)
+             where tickets.status = 'new' and tickets.archived_at is null
+            returning (xmax = 0) as created
             """,
             conversation_id, mode, type, title, summary, intent,
             action_items, urgency, contact, requested_slot,
             due_at,
         )
-        return row is not None
+        # xmax is zero only on a genuine insert, which is what distinguishes a
+        # new message from a re-read of one already in the inbox -- and the
+        # caller uses that to decide whether to announce it.
+        return bool(row and row["created"])
 
     async def list_tickets(
         self, *, mode: str | None = None, status: str | None = None, limit: int = 100
@@ -294,6 +324,7 @@ class Store:
             select t.id::text as id, t.type, t.title, t.summary, t.intent,
                    t.action_items, t.urgency, t.contact, t.requested_slot,
                    t.mode, t.status, t.created_at, t.due_at,
+                   t.project_id::text as project_id,
                    c.channel, c.degraded, c.lang
               from tickets t
               join conversations c on c.id = t.conversation_id
@@ -329,6 +360,28 @@ class Store:
             ticket_id, due_at,
         )
         return row is not None
+
+    async def delete_ticket(self, ticket_id: str) -> bool:
+        """Erase a message and the conversation behind it, permanently.
+
+        Deliberately not offered to the assistant, which only archives -- it
+        acts on text written by whoever called, so it must not be able to
+        destroy. The owner is a different case: it is their inbox, and being
+        unable to throw anything away is its own kind of broken.
+
+        The delete is aimed at the conversation so the cascade takes the turns
+        and the item with it; a ticket deleted on its own would leave the
+        transcript behind, which is the opposite of what "delete" means to
+        someone clearing out a message they did not want.
+        """
+        result = await self.pool.execute(
+            """
+            delete from conversations
+             where id = (select conversation_id from tickets where id = $1::uuid)
+            """,
+            ticket_id,
+        )
+        return result.startswith("DELETE") and int(result.split()[-1]) > 0
 
     async def set_ticket_status(self, ticket_id: str, status: str) -> bool:
         row = await self.pool.fetchrow(
@@ -880,9 +933,34 @@ class Store:
         )
         return [str(r["id"]) for r in rows]
 
-    async def resumable(self, conversation_id: str) -> bool:
+    async def claim_for_resume(self, conversation_id: str) -> bool:
+        """Take a conversation back over, reopening it if it has just ended.
+
+        A dropped socket and a caller who has finished look identical from
+        here, so the close handler ends the conversation either way. That made
+        one call arrive as two items whenever the network hiccuped: the
+        reconnect was refused, a fresh conversation started, and the caller's
+        name ended up in the first item and their phone number in the second --
+        which is precisely what nobody reading an inbox can reassemble.
+
+        So a conversation stays claimable for a while after it ends. Picking it
+        up puts it back to active, and the item is rebuilt from the whole
+        transcript when it ends again (see insert_ticket).
+
+        This mutates, unlike the `resumable` predicate it replaces. The check
+        and the claim have to be one statement or two sockets racing on a flaky
+        connection both win it.
+        """
         row = await self.pool.fetchrow(
-            "select 1 from conversations where id = $1::uuid and status = 'active'",
-            conversation_id,
+            """
+            update conversations
+               set status = 'active', ended_at = null
+             where id = $1::uuid
+               and (status = 'active'
+                    or (ended_at is not null
+                        and ended_at > now() - ($2 || ' minutes')::interval))
+            returning 1
+            """,
+            conversation_id, str(RESUME_GRACE_MINUTES),
         )
         return row is not None

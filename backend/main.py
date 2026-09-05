@@ -673,6 +673,24 @@ async def archive_item(
     return {"ok": True}
 
 
+@app.delete("/api/items/{ticket_id}")
+async def delete_item(
+    ticket_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Erase a message and its transcript for good.
+
+    Owner only, and not reachable by the assistant at all -- §13's erasure path
+    stays a deliberate human act. The app asks for confirmation before calling
+    this, because nothing here can undo it.
+    """
+    _require_session(authorization)
+    if not await _require_store().delete_ticket(ticket_id):
+        raise HTTPException(status_code=404, detail="no such item")
+    log.info("item deleted by owner", extra={"ticket_id": ticket_id})
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------ tasks
 #
 # A task is a thing to do that never had a conversation behind it. Tickets
@@ -1045,8 +1063,12 @@ async def _resume_or_ignore(
         return
 
     try:
-        if not await store.resumable(db_id):
-            log.info("resume refused: conversation not active")
+        # Claims and reopens in one statement: a conversation that ended
+        # seconds ago because the network dropped is the same call, not a new
+        # one, and treating it as new is what split single messages into two
+        # items with half the information in each.
+        if not await store.claim_for_resume(db_id):
+            log.info("resume refused: conversation too old to reopen")
             return
         history = await store.transcript(db_id)
     except Exception as e:

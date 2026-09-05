@@ -19,8 +19,10 @@
     <h1>Leave a message</h1>
     <button type="button" id="lang" class="icon"
             title="التحويل إلى العربية">ع</button>
+    <!-- A phone, not a microphone: this starts a call, it does not dictate a
+         message. The owner app made the same swap. -->
     <button type="button" id="mic" class="icon" aria-pressed="false"
-            title="Talk instead of typing">🎤</button>
+            title="Start a voice call" aria-label="Start a voice call">📞</button>
     <button type="button" id="mute" class="icon" aria-pressed="false"
             title="Mute the voice">🔊</button>
     <span class="state" id="state">connecting…</span>

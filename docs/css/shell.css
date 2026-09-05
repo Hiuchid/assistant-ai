@@ -87,22 +87,32 @@ body {
 /* The frame. On a phone it fills the screen; on desktop it stays phone-width
    so the layout is designed once rather than twice. */
 .shell {
+  /* Pinned to the layout viewport rather than sized in dvh.
+     dvh is resolved at first paint and, in an installed PWA drawing
+     edge-to-edge, that first value was too tall -- so the tab bar started life
+     underneath the phone's own navigation buttons and only corrected once
+     something forced a reflow. Opening the composer was such a thing, which is
+     why the app looked right only after visiting Talk. A fixed element with
+     inset:0 is measured against the layout viewport, which is stable from the
+     first frame and does not move when the keyboard opens. */
+  position: fixed;
+  inset: 0;
   width: min(100vw, 430px);
   max-width: 100vw;
-  /* vh first as the fallback, dvh second: on a phone with a retracting
-     toolbar, 100vh is the *largest* viewport and overflows behind the browser
-     chrome. dvh tracks what is actually visible. */
-  height: 100vh;
-  height: 100dvh;
-  max-height: 100dvh;
+  margin-inline: auto;
   background: var(--bg);
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   overflow: hidden;
-  position: relative;
 }
 @media (min-width: 480px) and (min-height: 720px) {
-  .shell { height: min(92dvh, 860px); border-radius: var(--r-xl); box-shadow: var(--shadow-2); }
+  .shell {
+    position: relative;
+    inset: auto;
+    height: min(92dvh, 860px);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-2);
+  }
 }
 
 /* ---------- header ---------- */
@@ -210,7 +220,7 @@ body {
   overflow-wrap: anywhere; min-width: 0;
 }
 .item h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-callout); font-weight: 650; }
-.item .meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; font-size: var(--fs-caption); color: var(--text-faint); }
+.item .meta, .sheet .meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; font-size: var(--fs-caption); color: var(--text-faint); }
 .item p { margin: var(--sp-2) 0 0; font-size: var(--fs-footnote); color: var(--text-dim); }
 .tag { font-size: var(--fs-caption-2); padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
 .tag.high { color: var(--danger); border-color: var(--danger); }
@@ -225,6 +235,17 @@ details.tr { margin-top: var(--sp-3); }
 details.tr summary { cursor: pointer; color: var(--text-faint); font-size: var(--fs-caption); }
 details.tr .line { font-size: var(--fs-footnote); margin: var(--sp-2) 0; color: var(--text-dim); }
 details.tr .line b { color: var(--text); font-weight: 550; }
+
+/* The message sheet: same pieces, no longer inside an .item card. */
+.transcript {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-3);
+  max-height: 40vh; overflow-y: auto;
+}
+.transcript .line { font-size: var(--fs-footnote); margin: 0 0 var(--sp-2); color: var(--text-dim); }
+.transcript .line:last-child { margin-bottom: 0; }
+.transcript .line b { color: var(--text); font-weight: 550; }
+.trow .flags { display: flex; gap: 4px; flex: none; }
 .actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); flex-wrap: wrap; }
 
 /* ---------- chat ---------- */
@@ -274,6 +295,13 @@ details.tr .line b { color: var(--text); font-weight: 550; }
      browsers, so max() keeps a floor rather than letting the labels sit under
      the system UI. Requires viewport-fit=cover, which app.html sets. */
   padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--sp-2));
+}
+/* Installed, the page draws edge to edge and the system bar is definitely on
+   top of it -- but Android reports 0 for the inset on some builds, which put
+   the labels underneath the phone's buttons. In a browser tab the viewport
+   already stops above them, so the taller floor only applies here. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  .tabs { padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--sp-6)); }
 }
 .tab {
   background: none; border: 0; color: var(--text-faint); cursor: pointer;
@@ -461,24 +489,41 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .pdot.med { background: var(--warn); }
 .pdot.low { background: var(--ok); }
 
-/* project cards */
+/* project cards
+ *
+ * The colour used to reach only the progress bar, which a project with no
+ * tasks does not have -- so picking one appeared to do nothing at all. It is
+ * an accent now: the spine of the card, the icon behind the emoji, and the
+ * bar when there is one. */
+.swatch-violet, .proj.violet { --accent: var(--primary-soft); }
+.swatch-blue,   .proj.blue   { --accent: var(--info); }
+.swatch-green,  .proj.green  { --accent: var(--ok); }
+.swatch-amber,  .proj.amber  { --accent: var(--warn); }
+.swatch-red,    .proj.red    { --accent: var(--danger); }
+.swatch-grey,   .proj.grey   { --accent: var(--text-faint); }
+
 .proj { display: block; width: 100%; text-align: left; color: inherit; font: inherit; cursor: pointer;
-        background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+        --accent: var(--primary-soft);
+        background: var(--surface); border: 1px solid var(--border);
+        border-left: 4px solid var(--accent); border-radius: var(--r-lg);
         padding: var(--sp-3); margin-bottom: var(--sp-2); }
 .proj:hover { background: var(--surface-2); }
 .proj .head { display: flex; align-items: center; gap: var(--sp-3); }
-.proj .emoji { font-size: 1.25rem; flex: none; }
+.proj .emoji { font-size: 1.1rem; flex: none; width: 36px; height: 36px; border-radius: 11px;
+               display: grid; place-items: center;
+               background: var(--surface-2); border: 1px solid var(--accent); }
 .proj .name { flex: 1; min-width: 0; font-size: var(--fs-callout); font-weight: 650;
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proj .sub { font-size: var(--fs-caption); color: var(--text-faint); margin-top: var(--sp-1); }
 .bar { height: 6px; background: var(--surface-2); border-radius: 6px; overflow: hidden; margin-top: var(--sp-2); }
-.bar i { display: block; height: 100%; border-radius: 6px; background: var(--primary-soft); }
-.proj.blue  .bar i { background: var(--info); }
-.proj.green .bar i { background: var(--ok); }
-.proj.amber .bar i { background: var(--warn); }
-.proj.red   .bar i { background: var(--danger); }
-.proj.grey  .bar i { background: var(--text-faint); }
+.bar i { display: block; height: 100%; border-radius: 6px; background: var(--accent); }
 .proj.is-done { opacity: .6; }
+
+/* A colour chip has to show the colour, or the picker is six words. */
+.sheet .chips button .swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 6px; vertical-align: -1px; background: var(--accent);
+}
 
 /* the form sheet: one dialog, whatever is being edited */
 .sheet {

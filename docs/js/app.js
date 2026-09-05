@@ -207,69 +207,38 @@ function card(item, icon) {
 }
 
 // ----------------------------------------------------------------- Inbox
+//
+// A list of rows, and the whole message behind whichever one is tapped. It
+// used to render every field of every item inline, which meant scrolling past
+// four transcripts to reach the fifth message.
 
-function itemHtml(it) {
-  const contact = Object.entries(it.contact || {})
-    .map(([k, v]) => `<span><i>${esc(k)}</i> <b>${esc(v)}</b></span>`).join("");
-  const todo = (it.action_items || []).map((a) => `<li>${esc(a)}</li>`).join("");
-  return `
-    <div class="item" data-id="${esc(it.id)}">
-      <h2>${esc(it.title)}</h2>
-      <div class="meta">
-        <span class="tag ${it.mode === "owner" ? "owner" : ""}">${esc(it.type)}</span>
-        ${it.urgency && it.urgency !== "low" ? `<span class="tag ${esc(it.urgency)}">${esc(it.urgency)}</span>` : ""}
-        ${dueTag(it.due_at)}
-        ${it.degraded ? '<span class="tag medium">no model</span>' : ""}
-        ${(it.lang || "").startsWith("ar")
-          ? '<span class="tag medium" title="Arabic call — speech recognition mangles mixed-in English, so check the transcript">عربي · check transcript</span>'
-          : ""}
-        <span>${esc(it.channel)}</span><span>${esc(ago(it.created_at))}</span>
-        <span>${esc(it.status)}</span>
-      </div>
-      <p>${esc(it.summary)}</p>
-      ${contact ? `<div class="contact">${contact}</div>` : ""}
-      ${it.requested_slot ? `<div class="contact"><span><i>asked for</i> <b>${esc(it.requested_slot)}</b></span></div>` : ""}
-      ${todo ? `<ul class="todo">${todo}</ul>` : ""}
-      <details class="tr"><summary>Transcript</summary><div class="body">loading…</div></details>
-      <div class="actions">
-        ${it.status !== "triaged" ? `<button class="pill" data-set="triaged">Triaged</button>` : ""}
-        ${it.status !== "done" ? `<button class="pill" data-set="done">Done</button>` : ""}
-      </div>
-    </div>`;
+const STATUSES_ITEM = [["new", "New"], ["triaged", "Triaged"], ["done", "Done"]];
+
+function contactName(it) {
+  const c = it.contact || {};
+  return c.name || c.company || c.phone || c.email || "";
 }
 
-function wireItems(root) {
-  for (const el of root.querySelectorAll(".item")) {
-    const id = el.dataset.id;
-    for (const b of el.querySelectorAll("[data-set]")) {
-      b.addEventListener("click", async () => {
-        b.disabled = true;
-        await api(`/api/items/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: b.dataset.set }),
-        });
-        await refresh();
-      });
-    }
-    // Fetched on expand: most items are actioned from the summary alone, and
-    // the transcript is by far the largest field.
-    const det = el.querySelector("details");
-    det.addEventListener("toggle", async () => {
-      const body = det.querySelector(".body");
-      if (!det.open || body.dataset.loaded) return;
-      body.dataset.loaded = "1";
-      try {
-        const { turns } = await api(`/api/items/${id}/transcript`);
-        body.innerHTML = turns.map((t) =>
-          `<div class="line"><b>${t.role === "customer" ? "Them" : "Assistant"}:</b> ${esc(t.text)}${
-            t.cancelled ? " <i>(cut off)</i>" : ""}</div>`).join("")
-          || '<div class="line">Transcript deleted or never recorded.</div>';
-      } catch {
-        body.textContent = "Could not load the transcript.";
-      }
-    });
+function itemRow(it) {
+  const who = contactName(it);
+  const bits = [who, ago(it.created_at), it.type].filter(Boolean);
+  const flags = [];
+  if (it.urgency === "high") flags.push('<span class="tag high">urgent</span>');
+  if (it.due_at && new Date(it.due_at) <= Date.now() && it.status !== "done") {
+    flags.push('<span class="tag high">overdue</span>');
   }
+  if ((it.lang || "").startsWith("ar")) flags.push('<span class="tag medium">عربي</span>');
+  if (it.status === "done") flags.push('<span class="tag ok">done</span>');
+
+  return `
+    <button type="button" class="trow" data-item-open="${esc(it.id)}">
+      <span class="ico">${it.mode === "owner" ? "\u{1F4DD}" : "\u{1F4E5}"}</span>
+      <span class="bd">
+        <span class="t">${esc(it.title)}</span>
+        <span class="s">${esc(bits.join(" · "))}</span>
+      </span>
+      ${flags.length ? `<span class="flags">${flags.join("")}</span>` : ""}
+    </button>`;
 }
 
 function renderInbox() {
@@ -277,9 +246,91 @@ function renderInbox() {
     (!filters.status || i.status === filters.status) &&
     (!filters.mode || i.mode === filters.mode));
   $("inboxBody").innerHTML = shown.length
-    ? shown.map(itemHtml).join("")
+    ? `<div class="row-list">${shown.map(itemRow).join("")}</div>`
     : '<div class="empty">Nothing here.</div>';
-  wireItems($("inboxBody"));
+}
+
+$("inboxBody").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-item-open]");
+  if (!row) return;
+  const item = items.find((i) => i.id === row.dataset.itemOpen);
+  if (item) openItem(item);
+});
+
+function openItem(it) {
+  const contact = Object.entries(it.contact || {})
+    .map(([k, v]) => `<span><i>${esc(k)}</i> <b>${esc(v)}</b></span>`).join("");
+  const todo = (it.action_items || []).map((a) => `<li>${esc(a)}</li>`).join("");
+  const meta = [
+    `<span class="tag ${it.mode === "owner" ? "owner" : ""}">${esc(it.type)}</span>`,
+    it.urgency && it.urgency !== "low"
+      ? `<span class="tag ${esc(it.urgency)}">${esc(it.urgency)}</span>` : "",
+    dueTag(it.due_at),
+    it.degraded ? '<span class="tag medium">no model</span>' : "",
+    (it.lang || "").startsWith("ar")
+      ? '<span class="tag medium" title="Arabic call - speech recognition mangles mixed-in English, so check the transcript">عربي · check transcript</span>'
+      : "",
+    `<span class="tag">${esc(it.channel)}</span>`,
+    `<span class="tag">${esc(ago(it.created_at))}</span>`,
+  ].filter(Boolean).join("");
+
+  openSheet(it.title, `
+    <div class="meta" style="margin-bottom:var(--sp-3)">${meta}</div>
+    <p class="note" style="color:var(--text-dim);font-size:var(--fs-footnote)">${esc(it.summary)}</p>
+    ${contact ? `<div class="contact">${contact}</div>` : ""}
+    ${it.requested_slot
+      ? `<div class="contact"><span><i>asked for</i> <b>${esc(it.requested_slot)}</b></span></div>` : ""}
+    ${todo ? `<ul class="todo">${todo}</ul>` : ""}
+    <label>Status</label>
+    ${chips("status", STATUSES_ITEM, it.status)}
+    <label for="f-project">Project</label>
+    ${projectOptions(it.project_id || "")}
+    <label>Transcript</label>
+    <div class="transcript" id="itemTranscript">loading…</div>`,
+    async () => {
+      const status = chipValue("status");
+      if (status && status !== it.status) {
+        await api(`/api/items/${it.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+      }
+      const project = $("f-project").value || null;
+      if (project !== (it.project_id || null)) {
+        await api(`/api/items/${it.id}/project`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: project }),
+        });
+      }
+    },
+    { danger: "Delete" });
+
+  // Deleting a message takes its transcript with it and cannot be undone, so
+  // it asks -- and says what it is about to lose rather than "are you sure?".
+  $("sheetForm").querySelector("[data-danger]").addEventListener("click", async () => {
+    const who = contactName(it);
+    if (!confirm(`Delete this message${who ? ` from ${who}` : ""}?\n\n` +
+                 "The transcript goes with it. This cannot be undone.")) return;
+    await api(`/api/items/${it.id}`, { method: "DELETE" });
+    closeSheet();
+    await refresh();
+  });
+
+  // Fetched on open rather than with the list: it is by far the largest field
+  // and most messages are dealt with from the summary alone.
+  api(`/api/items/${it.id}/transcript`).then(({ turns }) => {
+    const box = $("itemTranscript");
+    if (!box) return;
+    box.innerHTML = turns.map((t) =>
+      `<div class="line"><b>${t.role === "customer" ? "Them" : "Assistant"}:</b> ${
+        esc(t.text)}${t.cancelled ? " <i>(cut off)</i>" : ""}</div>`).join("")
+      || '<div class="line">Transcript deleted or never recorded.</div>';
+  }).catch(() => {
+    const box = $("itemTranscript");
+    if (box) box.textContent = "Could not load the transcript.";
+  });
 }
 
 // --------------------------------------------------------------- Planner
@@ -386,12 +437,14 @@ function closeSheet() {
 }
 
 // A chip group whose selection lives in the DOM, so the form has no state of
-// its own to keep in sync.
-function chips(name, options, current) {
+// its own to keep in sync. `swatch` prefixes each chip with a dot in the
+// colour it names -- a colour picker that only shows words is not one.
+function chips(name, options, current, { swatch = false } = {}) {
   return `<div class="chips" data-chips="${esc(name)}">${
     options.map(([value, label]) =>
       `<button type="button" data-value="${esc(value)}" aria-pressed="${
-        String(value === current)}">${esc(label)}</button>`).join("")}</div>`;
+        String(value === current)}" class="${swatch ? `swatch-${esc(value)}` : ""}">${
+        swatch ? '<span class="swatch"></span>' : ""}${esc(label)}</button>`).join("")}</div>`;
 }
 
 function chipValue(name) {
@@ -597,7 +650,7 @@ function openProject(project) {
     <input id="f-title" maxlength="120" placeholder="e.g. Rami's booking app"
            value="${esc(project ? project.name : "")}" required>
     <label>Colour</label>
-    ${chips("colour", COLOURS, project ? project.colour : "violet")}
+    ${chips("colour", COLOURS, project ? project.colour : "violet", { swatch: true })}
     ${project ? `<label>Status</label>${chips("status", STATUSES, project.status)}` : ""}
     <label for="f-notes">Notes</label>
     <textarea id="f-notes" maxlength="4000" placeholder="What is this, and what does done look like?">${
