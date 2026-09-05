@@ -19,10 +19,22 @@ from .providers.llm import Message
 
 Role = Literal["customer", "agent"]
 
-# §6: send the system prompt plus a sliding window of recent turns. Windowing
-# saves little on a short conversation -- most of the cost is in the early
-# turns -- but it bounds the tail, and the tail is what breaks the daily budget.
-WINDOW_TURNS = 6
+# §6: send the system prompt plus a window of turns, so a long call cannot run
+# the daily budget down on its own tail.
+#
+# It keeps **both ends**, not just the recent ones. A plain sliding window of
+# six turns meant three exchanges of memory, and in a message-taking call the
+# first thing said is who is calling -- so by the fourth exchange the assistant
+# had genuinely forgotten the caller's name and asked for it again. §6 always
+# intended a running summary to cover what fell out; that was never built, and
+# a window that keeps the opening is most of the same benefit for none of the
+# cost, because the opening is where the name, the company and the reason for
+# calling live.
+#
+# Only the middle is dropped, and a marker says so, so the model knows it is
+# missing something rather than assuming it was never told.
+HEAD_TURNS = 4
+TAIL_TURNS = 16
 
 
 @dataclass
@@ -66,8 +78,18 @@ class Conversation:
         self.turns.append(Turn(role=role, text=text, cancelled=cancelled))
         self.last_activity_at = time.time()
 
+    def window(self) -> tuple[list[Turn], int]:
+        """The turns to send, and how many were left out between them.
+
+        Short conversations -- which is nearly all of them -- go through whole.
+        """
+        if len(self.turns) <= HEAD_TURNS + TAIL_TURNS:
+            return self.turns, 0
+        kept = self.turns[:HEAD_TURNS] + self.turns[-TAIL_TURNS:]
+        return kept, len(self.turns) - len(kept)
+
     def messages(self, tz: str = "UTC") -> list[Message]:
-        """The system prompt plus the sliding window, in provider format.
+        """The system prompt plus the window, in provider format.
 
         The current local time is appended to the system prompt on every turn,
         not baked in at session start. Without it the model cannot resolve
@@ -75,10 +97,9 @@ class Conversation:
         calendar entry seven days out instead of on the day asked for. Built
         per turn rather than once, so it stays right in a long conversation.
 
-        TODO(phase-4): §6 also calls for a running summary of turns older than
-        the window. Not implemented -- conversations currently truncate rather
-        than compress, so anything said early is simply forgotten once it falls
-        out of the window.
+        §12: this assembles someone's words to send to a provider. It never
+        logs them, and the omission marker counts turns rather than quoting
+        any.
         """
         now = datetime.now(ZoneInfo(tz))
         messages: list[Message] = [
@@ -92,7 +113,17 @@ class Conversation:
                 ),
             }
         ]
-        for turn in self.turns[-WINDOW_TURNS:]:
+        kept, omitted = self.window()
+        for index, turn in enumerate(kept):
+            if omitted and index == HEAD_TURNS:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[{omitted} exchanges from the middle of this "
+                        f"conversation are not shown. You were told them. Do "
+                        f"not ask again for anything already given.]"
+                    ),
+                })
             role: Literal["user", "assistant"] = (
                 "user" if turn.role == "customer" else "assistant"
             )
