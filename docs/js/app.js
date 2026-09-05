@@ -860,7 +860,7 @@ function renderCalendar() {
         data-day="${key}" aria-label="${esc(dayName(key))}">
         <span class="n">${fromKey(key).getDate()}</span>
         <span class="dots">${dayEvents.length ? '<i class="ev"></i>' : ""}${
-          hasTask ? '<i class="tk"></i>' : ""}${hasItem ? '<i class="msg"></i>' : ""}</span>
+          hasTask ? '<i class="tk"></i>' : ""}${hasItem ? '<i class="ms"></i>' : ""}</span>
         ${multi ? '<span class="rng"></span>' : ""}
       </button>`);
   }
@@ -884,7 +884,7 @@ function renderCalendar() {
   $("calLegend").innerHTML =
     '<span><i class="ev"></i>event</span>'
     + '<span><i class="tk"></i>task</span>'
-    + '<span><i class="msg"></i>message</span>';
+    + '<span><i class="ms"></i>message</span>';
 
   $("dayLabel").textContent = dayName(selDay);
   renderAgenda();

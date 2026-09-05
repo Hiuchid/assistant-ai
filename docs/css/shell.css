@@ -498,10 +498,11 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .cd[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); }
 .cd[aria-pressed="true"] .n { color: var(--on-primary); }
 .cd .dots { display: flex; gap: 3px; height: 5px; }
-.cd .dots i { width: 5px; height: 5px; border-radius: 50%; display: block; }
+.cd .dots i { width: 5px; height: 5px; border-radius: 50%; display: block;
+              padding: 0; margin: 0; max-width: none; flex: none; }
 .cd .dots i.ev { background: var(--warn); }
 .cd .dots i.tk { background: var(--primary-soft); }
-.cd .dots i.msg { background: var(--info); }
+.cd .dots i.ms { background: var(--info); }
 .cd[aria-pressed="true"] .dots i { background: var(--on-primary); }
 /* A bar under the number marks a day inside a multi-day event. */
 .cd .rng { position: absolute; bottom: 3px; left: 5px; right: 5px;
@@ -513,10 +514,11 @@ details.tr .line b { color: var(--text); font-weight: 550; }
   margin-top: var(--sp-2); font-size: var(--fs-caption-2); color: var(--text-faint);
 }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
-.legend i { width: 5px; height: 5px; border-radius: 50%; display: block; }
+.legend i { width: 5px; height: 5px; border-radius: 50%; display: block;
+            padding: 0; margin: 0; max-width: none; flex: none; }
 .legend i.ev { background: var(--warn); }
 .legend i.tk { background: var(--primary-soft); }
-.legend i.msg { background: var(--info); }
+.legend i.ms { background: var(--info); }
 
 /* the four counters under the grid */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); margin: var(--sp-3) 0; }
