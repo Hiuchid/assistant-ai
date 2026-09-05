@@ -65,6 +65,11 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* Any author rule with a display value beats the UA [hidden] rule, so
+   .login-view's display:grid kept it on screen after sign-in. Make hidden
+   actually mean hidden. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--page);
