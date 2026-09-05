@@ -137,12 +137,16 @@ class Summarizer:
         self._ladder = ladder
         self._tz = ZoneInfo(tz)
 
-    async def _ask(self, transcript: str, mode: Mode) -> TicketDraft | None:
+    async def _ask(
+        self, transcript: str, mode: Mode, lang: str = "en"
+    ) -> TicketDraft | None:
         messages: list[Message] = [
             {
                 "role": "system",
                 "content": system_prompt(
-                    mode, now_iso=datetime.now(self._tz).isoformat(timespec="minutes")
+                    mode,
+                    now_iso=datetime.now(self._tz).isoformat(timespec="minutes"),
+                    lang=lang,
                 ),
             },
             {"role": "user", "content": user_prompt(transcript)},
@@ -173,6 +177,8 @@ class Summarizer:
             return False
 
         mode: Mode = "owner" if meta["mode"] == "owner" else "visitor"
+        # Stored as a locale ("ar-LB"); the prompt only needs the language.
+        lang = "ar" if str(meta.get("lang") or "").startswith("ar") else "en"
         turns = await self._store.transcript(conversation_id)
         if not turns:
             log.info("summarise skipped: no turns")
@@ -187,12 +193,12 @@ class Summarizer:
         row: TicketFields
         if not meta["degraded"]:
             try:
-                draft = await self._ask(transcript, mode)
+                draft = await self._ask(transcript, mode, lang)
                 if draft is None:
                     # §9: retry once. Model output is nondeterministic and a
                     # second attempt frequently parses.
                     log.info("retrying summariser once")
-                    draft = await self._ask(transcript, mode)
+                    draft = await self._ask(transcript, mode, lang)
             except LadderExhausted as e:
                 log.warning(
                     "summariser had no model available",

@@ -14,6 +14,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # whose entire content is deliberately Arabic. Scoped to that one file so the
 # check keeps working everywhere it means something.
 "backend/prompts/visitor_ar.py" = ["RUF001", "RUF002", "RUF003"]
+"backend/repair.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.12"

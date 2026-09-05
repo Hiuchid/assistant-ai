@@ -71,7 +71,30 @@ cannot act on a message they cannot reply to.
 """
 
 
-def system_prompt(mode: Mode, *, now_iso: str) -> str:
+# Added only for Arabic calls. Measured (§14): Whisper transliterates the
+# English words Lebanese speakers mix in, and the repair pass does not always
+# recover them -- in one live call "printing" came back as "printer", and the
+# filler word "وهيدا" was read as a noun, "head". The summary then confidently
+# described "a quote for a printer and a head".
+#
+# A wrong item is worse than an incomplete one, because it reads as certain and
+# gets acted on. So the model is told to leave gaps rather than fill them.
+ARABIC_CAUTION = """\
+This call was in Arabic. Speech recognition mangles the English words Lebanese \
+speakers mix in, so parts of the transcript may be wrong in ways that still \
+read as ordinary words.
+
+Therefore: do NOT invent a noun from an unclear word. If something does not \
+make sense, leave it out, or say plainly that part of the call was unclear. A \
+summary that admits it missed something is useful; one that confidently names \
+the wrong thing is worse than useless, because it will be acted on.
+
+Write the summary in English. Keep names, numbers and companies exactly as \
+they appear.
+"""
+
+
+def system_prompt(mode: Mode, *, now_iso: str, lang: str = "en") -> str:
     """Build the prompt, including what the current time is.
 
     Without it the model cannot resolve "Friday" or "tomorrow" into anything,
@@ -81,6 +104,7 @@ def system_prompt(mode: Mode, *, now_iso: str) -> str:
         (_OWNER if mode == "owner" else _VISITOR)
         + "\n"
         + _SHARED_RULES
+        + (f"\n{ARABIC_CAUTION}" if lang == "ar" else "")
         + f"\nThe current local time is {now_iso}.\n"
     )
 

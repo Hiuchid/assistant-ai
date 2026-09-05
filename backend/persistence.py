@@ -137,6 +137,12 @@ class Store:
             conversation_id, channel,
         )
 
+    async def set_language(self, conversation_id: str, lang: str) -> None:
+        await self.pool.execute(
+            "update conversations set lang = $2 where id = $1::uuid",
+            conversation_id, "ar-LB" if lang == "ar" else "en-GB",
+        )
+
     async def mark_degraded(self, conversation_id: str) -> None:
         await self.pool.execute(
             "update conversations set degraded = true where id = $1::uuid",
@@ -236,7 +242,7 @@ class Store:
     async def conversation_meta(self, conversation_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow(
             """
-            select mode, channel, degraded, status
+            select mode, channel, degraded, status, lang
               from conversations
              where id = $1::uuid
             """,
@@ -288,7 +294,7 @@ class Store:
             select t.id::text as id, t.type, t.title, t.summary, t.intent,
                    t.action_items, t.urgency, t.contact, t.requested_slot,
                    t.mode, t.status, t.created_at, t.due_at,
-                   c.channel, c.degraded
+                   c.channel, c.degraded, c.lang
               from tickets t
               join conversations c on c.id = t.conversation_id
              where t.archived_at is null

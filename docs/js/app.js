@@ -179,6 +179,9 @@ function itemHtml(it) {
         ${it.urgency && it.urgency !== "low" ? `<span class="tag ${esc(it.urgency)}">${esc(it.urgency)}</span>` : ""}
         ${dueTag(it.due_at)}
         ${it.degraded ? '<span class="tag medium">no model</span>' : ""}
+        ${(it.lang || "").startsWith("ar")
+          ? '<span class="tag medium" title="Arabic call — speech recognition mangles mixed-in English, so check the transcript">عربي · check transcript</span>'
+          : ""}
         <span>${esc(it.channel)}</span><span>${esc(ago(it.created_at))}</span>
         <span>${esc(it.status)}</span>
       </div>

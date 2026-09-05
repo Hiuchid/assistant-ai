@@ -67,6 +67,7 @@ from .providers.tts.fish import FishAudioTTS
 from .providers.tts.piper import PiperTTS
 from .push import PushSender, rows_to_subscriptions
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
+from .repair import repair_arabic
 from .sentences import SentenceSplitter
 from .session import Conversation, SessionStore, Turn
 from .summarize import Summarizer, draft_from_degraded
@@ -874,7 +875,9 @@ async def _persist_turn(
         if conversation.db_id is None:
             # Created lazily: a socket that never says anything leaves no row.
             conversation.db_id = await store.create_conversation(
-                mode=conversation.mode, channel=conversation.channel
+                mode=conversation.mode,
+                channel=conversation.channel,
+                lang="ar-LB" if conversation.lang == "ar" else "en-GB",
             )
             if settings.resume_token_secret:
                 await websocket.send_json(
@@ -975,10 +978,17 @@ async def _transcribe(
         await _set_language(conversation, transcript.language)
         await websocket.send_json({"type": "lang", "lang": conversation.lang})
 
+    text = transcript.text
+    if conversation.lang == "ar":
+        # Whisper writes English words in Arabic letters, and nothing at the
+        # transcription step fixes it (§14). Repairing here means the stored
+        # transcript, the echo and what the model reads are all the same text.
+        text = await repair_arabic(text, websocket.app.state.ladder)
+
     # Echo it back so the caller sees what was heard, which is the only way to
     # notice a misrecognition before it ends up in the ticket.
-    await websocket.send_json({"type": "transcript", "text": transcript.text})
-    return transcript.text
+    await websocket.send_json({"type": "transcript", "text": text})
+    return text
 
 
 async def _say(
@@ -1076,6 +1086,11 @@ async def _set_language(conversation: Conversation, lang: str) -> None:
     conversation.system_prompt = (
         arabic_visitor_prompt(briefing) if lang == "ar" else visitor_prompt(briefing)
     )
+    if store is not None and conversation.db_id:
+        try:
+            await store.set_language(conversation.db_id, lang)
+        except Exception as e:
+            log.error("could not record language", extra={"error": repr(e)})
     log.info("conversation language set", extra={"lang": lang})
 
 
