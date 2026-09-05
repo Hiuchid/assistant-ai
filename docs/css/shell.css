@@ -89,6 +89,10 @@ body {
 .shell {
   width: min(100vw, 430px);
   max-width: 100vw;
+  /* vh first as the fallback, dvh second: on a phone with a retracting
+     toolbar, 100vh is the *largest* viewport and overflows behind the browser
+     chrome. dvh tracks what is actually visible. */
+  height: 100vh;
   height: 100dvh;
   max-height: 100dvh;
   background: var(--bg);
@@ -104,7 +108,7 @@ body {
 /* ---------- header ---------- */
 .appbar {
   background: linear-gradient(180deg, var(--header-grad-1), var(--header-grad-2));
-  padding: calc(var(--sp-3) + env(safe-area-inset-top)) var(--sp-4) var(--sp-3);
+  padding: calc(var(--sp-3) + env(safe-area-inset-top, 0px)) var(--sp-4) var(--sp-3);
   display: flex; align-items: center; gap: var(--sp-3);
 }
 .appbar .title { flex: 1; text-align: center; }
@@ -239,6 +243,8 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .composer {
   display: flex; align-items: center; gap: var(--sp-1); min-width: 0;
   padding: var(--sp-2) var(--sp-3);
+  /* Sits directly above the tab bar, which carries the safe-area padding, so
+     this needs none of its own. */
   border-top: 1px solid var(--border); background: var(--bg);
 }
 .composer input {
@@ -263,7 +269,11 @@ details.tr .line b { color: var(--text); font-weight: 550; }
   display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
   background: var(--nav-bg); backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
-  padding-bottom: env(safe-area-inset-bottom);
+  /* The phone's own navigation bar sits on top of the page. env() reports how
+     much room it needs, but it is 0 on Android gesture bars and in desktop
+     browsers, so max() keeps a floor rather than letting the labels sit under
+     the system UI. Requires viewport-fit=cover, which app.html sets. */
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--sp-2));
 }
 .tab {
   background: none; border: 0; color: var(--text-faint); cursor: pointer;
