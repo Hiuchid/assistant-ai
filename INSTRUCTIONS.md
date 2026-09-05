@@ -874,6 +874,49 @@ pre-rendered hold line.
 immediately, per-stage latency is logged, and a third concurrent voice session gets the hold
 message rather than a 429.
 
+**[r5] ⚠️ THE VAD GATE FAILED. `@ricky0123/vad-web` is not used.**
+
+Measured 2026-09-05, as §5 required before wiring it in:
+
+| Asset | Raw | Gzipped |
+|---|---|---|
+| `ort-wasm-simd-threaded.wasm` | **10,947 KB** | **2,816 KB** |
+| `silero_vad_v5.onnx` | 2,273 KB | 1,899 KB |
+| bundle + worklet + ort glue | 89 KB | 30 KB |
+| **Total** | **13,310 KB** | **4,745 KB** |
+
+§3.2 budgets "~1–2 MB" for a widget that must load fast on mobile data. This is **4×** that,
+and the ONNX model is the small part — the runtime dominates, exactly as r2 warned.
+
+**There is no smaller build.** onnxruntime-web 1.22.0 has dropped `ort-wasm-simd.wasm` and
+`ort-wasm.wasm` (both 404); the only alternative is the WebGPU `jsep` variant at 5,023 KB
+gzipped, which is larger still.
+
+**Replacement: energy-based endpointing.** An `AnalyserNode` measuring RMS against a noise
+floor calibrated from the actual room at mic-start, with a 900 ms hangover and a 400 ms
+minimum utterance. **Zero download.** It provides both automatic end-of-utterance and
+barge-in, which is what §7 needed the VAD for.
+
+Honest trade: Silero is more robust in background noise. If that bites in practice, the
+upgrade path is to **lazy-load it on first mic use**, so text-only visitors still pay nothing.
+
+**[r5] ✅ Phase 3 otherwise DONE 2026-09-05.**
+
+- Verified live: speech in → `'Hello, my name is Sam and I would like to leave a message.'`
+  transcribed verbatim → reply at 69 ms first token → two sentences returned as two
+  correctly-sequenced MP3 chunks.
+- Voice has its own cap of 2, derived from Groq's 20 transcriptions/minute against ~9
+  utterances/minute per speaker. Exceeding it returns the pre-rendered hold line, not a 429.
+- Barge-in signals on speech detection *before* the upload, so the server cancels LLM and
+  TTS work in flight rather than after paying for it.
+- **Audio deliberately trails the `done` marker.** Text completion re-enables the composer
+  immediately rather than making the caller wait ~4 s for synthesis. A client that stops
+  reading at `done` misses the audio — that caught out the first test harness.
+
+**[r5] Not verified: real microphone capture in a browser.** The whole server path is proven,
+but nothing here can speak into a mic. The endpointing thresholds (`SPEECH_MARGIN`,
+`SILENCE_HANGOVER_MS`) are untuned guesses until someone talks to it.
+
 ### Phase 4 — Persistence and auth **[r2/r3: revised]**
 
 Supabase schema applied. Conversations and turns written as they happen.
