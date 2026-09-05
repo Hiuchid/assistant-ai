@@ -826,6 +826,42 @@ record the defaults. Decide the single wire format (§4) and record why.
 **Done when:** text in, spoken reply out, cache hits logged, sentences always play in order,
 and killing edge-tts mid-conversation trips to Piper automatically without dropping the turn.
 
+**[r5] ✅ DONE 2026-09-05, with the backend choice changed on measurement.**
+
+| Backend | Latency | Verdict |
+|---|---|---|
+| edge-tts | **555 ms** median | Passes the <600 ms gate. Confirmed working *from this VPS IP* — closes a §11 open question. |
+| Piper `en_GB-alan-medium` | 2630 ms, **RTF 0.77x** | Passes the RTF gate, but 2.6 s wall clock is far too slow to lead. Fallback only. |
+| Groq Orpheus | 576–870 ms | Fast, but **100 requests/day** — at 2–3 calls per reply that is ~5 conversations/day. Unusable as primary. |
+| **Fish Audio** `s2.1-pro-free` | 1900–3000 ms | **Chosen as primary.** Free with *no request-count limit* (concurrency 5), and a far better voice. |
+
+**The chain is Fish → edge-tts → Piper**, descending in quality and ascending in
+reliability, each with its own circuit breaker. r3 assumed edge-tts primary with Piper
+behind it; a third tier exists because Fish is slow and third-party, edge-tts is fast but
+unofficial, and Piper is the only one nobody else can switch off.
+
+**[r5] Voice is per mode (§1).** Owner hears a community Jarvis model; visitors hear a
+generic "Elderly British Butler". The Jarvis model is a third-party clone of a real actor's
+voice — confined to owner mode deliberately — and the free Fish tier is **non-commercial
+only**. Both constraints must be re-read before any commercial change.
+
+**[r5] No pitch shifting.** It sounded robotic, and measurement explains why: each -4 Hz of
+edge-tts pitch moves real F0 by only ~2.2 Hz, so a genuinely deep voice needs about -56 Hz,
+far past where artefacts start. Rate is a time-stretch and does not touch timbre, so -8% is
+kept. Reference F0: Ryan plain 123.9 Hz, Ryan at -8 Hz 117.0 Hz, `en-AU-William` 105.5 Hz
+unshifted, piper alan 89.6 Hz.
+
+**[r5] Wire format settled.** Each backend's native bytes go to the browser with their mime
+type, and `decodeAudioData` handles MP3 and WAV alike — one client decode path, zero
+server-side transcoding. This works *only* because synthesis is per-sentence, so every chunk
+is a complete file. Do not move to mid-sentence chunking without replacing the client decoder.
+
+**[r5] Verified live:** 3 synthesis calls for a 3-sentence reply, no breaker trips, 15 cache
+files (12 pinned warm-up phrases across both voices, plus the reply).
+
+**[r5] Not yet verified:** the breaker actually tripping under a real Fish or edge-tts
+outage. Unit-tested paths only — worth forcing once.
+
 ### Phase 3 — Voice input
 
 `MediaRecorder` capture, `@ricky0123/vad-web` endpointing, webm/opus upload, Groq Whisper,
