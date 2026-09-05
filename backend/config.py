@@ -216,6 +216,19 @@ class Settings(BaseSettings):
     inactivity_minutes: int = 5
     sweep_interval_s: int = 60
 
+    # ---- Reminders ----
+    # Any endpoint that accepts a POST body; ntfy.sh is the intended default
+    # because it needs no account and no key. Unset means reminders still
+    # appear in the dashboard but nothing pushes to a phone.
+    #
+    # The topic in that URL is the ONLY secret -- anyone who knows it can read
+    # your reminders and send you fake ones. Use a long random topic.
+    notify_url: str | None = None
+
+    # Used to resolve "Friday" and "tomorrow" into an actual timestamp. The
+    # model is told this time; getting it wrong silently shifts every reminder.
+    timezone: str = "Asia/Beirut"
+
     # ---- Phase 3: voice input ----
     stt_model: str = "whisper-large-v3-turbo"
     # Pinned rather than auto-detected: Whisper hallucinates translations on

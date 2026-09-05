@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Self
 
 import asyncpg
@@ -239,6 +240,7 @@ class Store:
         urgency: str,
         contact: dict[str, str],
         requested_slot: str | None,
+        due_at: datetime | None = None,
     ) -> bool:
         """Insert the item. False means one already existed.
 
@@ -250,13 +252,14 @@ class Store:
             """
             insert into tickets (conversation_id, mode, type, title, summary,
                                  intent, action_items, urgency, contact,
-                                 requested_slot)
-            values ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
+                                 requested_slot, due_at)
+            values ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11)
             on conflict (conversation_id) do nothing
             returning id
             """,
             conversation_id, mode, type, title, summary, intent,
             json.dumps(action_items), urgency, json.dumps(contact), requested_slot,
+            due_at,
         )
         return row is not None
 
@@ -267,7 +270,7 @@ class Store:
             """
             select t.id::text as id, t.type, t.title, t.summary, t.intent,
                    t.action_items, t.urgency, t.contact, t.requested_slot,
-                   t.mode, t.status, t.created_at,
+                   t.mode, t.status, t.created_at, t.due_at,
                    c.channel, c.degraded
               from tickets t
               join conversations c on c.id = t.conversation_id
@@ -305,6 +308,34 @@ class Store:
                        cancelled=r["cancelled"])
             for r in rows
         ]
+
+    # ----------------------------------------------------------- reminders
+
+    async def due_reminders(self) -> list[dict[str, Any]]:
+        """Items whose time has come and which have not been announced yet.
+
+        `status <> 'done'` so an item already dealt with never pings. Nothing
+        is marked here -- the caller marks only what it actually delivered, so
+        a failed notification retries on the next sweep instead of vanishing.
+        """
+        rows = await self.pool.fetch(
+            """
+            select id::text as id, title, summary, due_at, mode, type, contact
+              from tickets
+             where due_at is not null
+               and notified_at is null
+               and status <> 'done'
+               and due_at <= now()
+             order by due_at
+             limit 20
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def mark_notified(self, ticket_id: str) -> None:
+        await self.pool.execute(
+            "update tickets set notified_at = now() where id = $1::uuid", ticket_id
+        )
 
     # ------------------------------------------------------------ sweeping
 

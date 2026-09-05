@@ -57,6 +57,16 @@ let timer = null;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 
+function due(iso) {
+  if (!iso) return "";
+  const d = new Date(iso), mins = Math.round((d - Date.now()) / 60000);
+  const label = d.toLocaleString(undefined,
+    { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  if (mins < 0) return `<span class="tag high">overdue · ${esc(label)}</span>`;
+  if (mins < 1440) return `<span class="tag medium">due ${esc(label)}</span>`;
+  return `<span class="tag">due ${esc(label)}</span>`;
+}
+
 function when(iso) {
   const d = new Date(iso), mins = Math.round((Date.now() - d) / 60000);
   if (mins < 1) return "just now";
@@ -94,6 +104,7 @@ function render(items) {
         <span class="tag ${it.mode === "owner" ? "owner" : ""}">${esc(it.type)}</span>
         ${it.urgency && it.urgency !== "low"
           ? `<span class="tag ${esc(it.urgency)}">${esc(it.urgency)}</span>` : ""}
+        ${due(it.due_at)}
         ${it.degraded ? '<span class="tag degraded">no model</span>' : ""}
         <span>${esc(it.channel)}</span>
         <span>${when(it.created_at)}</span>

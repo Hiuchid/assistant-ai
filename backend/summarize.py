@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Literal, TypedDict
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -53,6 +55,7 @@ class TicketFields(TypedDict):
     urgency: str
     contact: dict[str, str]
     requested_slot: str | None
+    due_at: datetime | None
 
 
 OWNER_TYPES = ("note", "task", "reminder", "other")
@@ -70,6 +73,7 @@ class TicketDraft(BaseModel):
     urgency: Literal["low", "medium", "high"] | None = "low"
     contact: dict[str, str] = Field(default_factory=dict)
     requested_slot: str | None = None
+    due_at: datetime | None = None
 
     @field_validator("title")
     @classmethod
@@ -128,13 +132,19 @@ def _coerce_type(draft_type: str, mode: Mode) -> str:
 
 
 class Summarizer:
-    def __init__(self, store: Store, ladder: GroqLadder) -> None:
+    def __init__(self, store: Store, ladder: GroqLadder, *, tz: str = "UTC") -> None:
         self._store = store
         self._ladder = ladder
+        self._tz = ZoneInfo(tz)
 
     async def _ask(self, transcript: str, mode: Mode) -> TicketDraft | None:
         messages: list[Message] = [
-            {"role": "system", "content": system_prompt(mode)},
+            {
+                "role": "system",
+                "content": system_prompt(
+                    mode, now_iso=datetime.now(self._tz).isoformat(timespec="minutes")
+                ),
+            },
             {"role": "user", "content": user_prompt(transcript)},
         ]
         chunks: list[str] = []
@@ -199,6 +209,7 @@ class Summarizer:
                 urgency=draft.urgency or "low",
                 contact=draft.contact,
                 requested_slot=draft.requested_slot,
+                due_at=draft.due_at,
             )
         else:
             # §9: never drop the lead. A human can read a raw transcript; they
@@ -213,6 +224,7 @@ class Summarizer:
                 urgency="low",
                 contact={},
                 requested_slot=None,
+                due_at=None,
             )
 
         try:
@@ -250,4 +262,6 @@ def draft_from_degraded(capture: DegradedCapture) -> TicketFields:
         urgency="low",
         contact=capture.contact(),
         requested_slot=capture.answers.get(Step.WHEN),
+        # No model ran, so nothing parsed a date out of the free text.
+        due_at=None,
     )

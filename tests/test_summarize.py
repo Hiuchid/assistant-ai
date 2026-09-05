@@ -164,6 +164,8 @@ def test_degraded_item_survives_a_caller_who_hung_up_early() -> None:
 
     fields = draft_from_degraded(capture)
     assert fields["title"] == "Message from Priya"
+    # No model ran, so nothing parsed a date out of the free text.
+    assert fields["due_at"] is None
     assert fields["requested_slot"] is None
     assert "(not given)" in fields["summary"]
 
@@ -175,6 +177,6 @@ def test_degraded_fields_match_what_insert_ticket_expects() -> None:
     fields = draft_from_degraded(capture)
     assert set(fields) == {
         "type", "title", "summary", "intent", "action_items",
-        "urgency", "contact", "requested_slot",
+        "urgency", "contact", "requested_slot", "due_at",
     }
     assert capture.answers.get(Step.WHEN) is None

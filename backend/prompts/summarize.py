@@ -31,8 +31,15 @@ there is nothing to do, use an empty list.
 - title is a short label a person can scan in a list. No more than 8 words.
 - summary is 1-3 sentences of plain prose. No markdown, no bullet points.
 
+- due_at is an ISO 8601 timestamp WITH offset, e.g. 2026-09-11T09:00:00+03:00, \
+for anything time-bound: a reminder, a deadline, a callback time. Resolve \
+relative words against the current time given below. If no specific time was \
+given but a day was, use 09:00 local. Use null when nothing is time-bound - \
+do NOT invent a time to fill the field.
+
 Reply with ONLY a JSON object, no prose around it, with exactly these keys:
-type, title, summary, intent, action_items, urgency, contact, requested_slot.
+type, title, summary, intent, action_items, urgency, contact, requested_slot,
+due_at.
 """
 
 _OWNER = """\
@@ -64,8 +71,18 @@ cannot act on a message they cannot reply to.
 """
 
 
-def system_prompt(mode: Mode) -> str:
-    return (_OWNER if mode == "owner" else _VISITOR) + "\n" + _SHARED_RULES
+def system_prompt(mode: Mode, *, now_iso: str) -> str:
+    """Build the prompt, including what the current time is.
+
+    Without it the model cannot resolve "Friday" or "tomorrow" into anything,
+    and will either refuse or invent a date. Both are worse than being told.
+    """
+    return (
+        (_OWNER if mode == "owner" else _VISITOR)
+        + "\n"
+        + _SHARED_RULES
+        + f"\nThe current local time is {now_iso}.\n"
+    )
 
 
 def user_prompt(transcript: str) -> str:

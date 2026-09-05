@@ -39,6 +39,7 @@ from . import auth, resume
 from .config import OWNER_VOICE, VISITOR_VOICE, Settings, get_settings
 from .degraded import ALL_FIXED_LINES, DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
+from .notify import Notifier
 from .persistence import Store
 from .prompts.owner import OWNER_SYSTEM_PROMPT
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT
@@ -93,6 +94,7 @@ _DUMMY_HASH = auth.hash_password("this is not anybody's password")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ladder = GroqLadder(settings)
     app.state.stt = GroqWhisper(settings)
+    app.state.notifier = Notifier(settings.notify_url)
 
     # §3.3: the database is the source of truth. Without a DSN the assistant
     # still runs, but nothing is recorded and no item can be generated -- so it
@@ -160,6 +162,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         warm.cancel()
         await app.state.ladder.aclose()
         await app.state.stt.aclose()
+        await app.state.notifier.aclose()
         if app.state.store is not None:
             await app.state.store.close()
         if app.state.fish is not None:
@@ -192,6 +195,42 @@ async def _evict_idle_sessions() -> None:
         # degraded path.
         log.info("quota", extra={"remaining": app.state.ladder.ledger.snapshot()})
         await _sweep_stale_conversations()
+        await _fire_due_reminders()
+
+
+async def _fire_due_reminders() -> None:
+    """Announce items whose time has come.
+
+    A reminder that only appears in a dashboard you have to remember to open is
+    not much of a reminder, so this pushes.
+
+    Only what actually went out is marked notified. A failed push leaves the
+    item unfired so the next sweep retries it -- marking it either way would
+    turn a transient network error into a silently missed reminder.
+    """
+    store: Store | None = app.state.store
+    if store is None:
+        return
+    notifier: Notifier = app.state.notifier
+    try:
+        due = await store.due_reminders()
+    except Exception as e:
+        log.error("reminder query failed", extra={"error": repr(e)})
+        return
+
+    for item in due:
+        who = "" if item["mode"] == "owner" else " (from a message)"
+        if await notifier.send(title=f"{item['title']}{who}", body=item["summary"]):
+            await store.mark_notified(item["id"])
+            log.info("reminder fired", extra={"ticket_id": item["id"]})
+        elif not notifier.configured:
+            # Nothing will ever deliver these, so do not re-log the same items
+            # every minute for the life of the process.
+            await store.mark_notified(item["id"])
+            log.warning(
+                "reminder due but undeliverable; marked to stop repeating",
+                extra={"ticket_id": item["id"], "title": item["title"]},
+            )
 
 
 async def _sweep_stale_conversations() -> None:
@@ -208,7 +247,7 @@ async def _sweep_stale_conversations() -> None:
         if not stale:
             return
         log.info("sweeping stale conversations", extra={"count": len(stale)})
-        summarizer = Summarizer(store, app.state.ladder)
+        summarizer = Summarizer(store, app.state.ladder, tz=settings.timezone)
         for conversation_id in stale:
             try:
                 await summarizer.run(conversation_id)
@@ -684,7 +723,9 @@ async def _finalise(app: FastAPI, conversation: Conversation) -> None:
             await store.end_conversation(conversation.db_id)
             log.info("degraded item written")
             return
-        await Summarizer(store, app.state.ladder).run(conversation.db_id)
+        await Summarizer(store, app.state.ladder, tz=settings.timezone).run(
+            conversation.db_id
+        )
     except Exception as e:
         # A conversation that cannot be summarised must not take the socket
         # teardown down with it.
