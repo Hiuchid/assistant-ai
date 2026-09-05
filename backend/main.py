@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
 from .config import Settings, get_settings
+from .degraded import DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT
 from .providers.llm import (
@@ -31,7 +32,7 @@ from .providers.llm import (
     Token,
 )
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
-from .session import SessionStore
+from .session import Conversation, SessionStore
 
 VERSION: Final = "0.2.0"
 
@@ -71,15 +72,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 async def _evict_idle_sessions() -> None:
-    """Drop conversations nobody is using.
+    """Drop idle conversations and report quota headroom.
 
-    Phase 4 replaces this with the database sweeper that also triggers ticket
-    generation on the 5-minute inactivity timeout (§9).
+    Phase 4 replaces the eviction half with the database sweeper that also
+    triggers ticket generation on the 5-minute inactivity timeout (§9).
     """
     while True:
         await asyncio.sleep(60)
         if evicted := sessions.evict_idle():
             log.info("evicted idle sessions", extra={"count": evicted})
+        # §6: log remaining quota per model once a minute. We cannot tune what
+        # we cannot see, and this is the only view of how close we are to the
+        # degraded path.
+        log.info("quota", extra={"remaining": app.state.ladder.ledger.snapshot()})
 
 
 app = FastAPI(
@@ -201,6 +206,26 @@ async def ws_chat(websocket: WebSocket) -> None:
         sessions.drop(conversation.id)
 
 
+async def _say(
+    websocket: WebSocket,
+    conversation: Conversation,
+    lines: list[str],
+    *,
+    model: str,
+) -> None:
+    """Send fixed text over the same wire shape as a streamed reply.
+
+    The client renders it identically -- it should not be able to tell that no
+    model was involved, beyond the label in the latency line.
+    """
+    text = " ".join(lines)
+    conversation.add("agent", text)
+    await websocket.send_json({"type": "token", "text": text})
+    await websocket.send_json(
+        {"type": "done", "model": model, "first_token_ms": 0, "total_ms": 0}
+    )
+
+
 async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str) -> None:
     conversation = sessions.get(conversation_id)
     if conversation is None:
@@ -210,6 +235,12 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
     # §12: never log transcript content at INFO -- this is someone's message.
     log.debug("customer turn", extra={"chars": len(text)})
     conversation.add("customer", text)
+
+    # Already in the scripted path: no model is involved, and none is needed.
+    if conversation.degraded is not None:
+        await _say(websocket, conversation, conversation.degraded.submit(text),
+                   model="degraded-capture")
+        return
 
     reply: list[str] = []
     ladder: GroqLadder = websocket.app.state.ladder
@@ -229,15 +260,13 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
                     }
                 )
     except LadderExhausted as e:
-        # TODO(phase-1.5): §6 requires the scripted no-LLM capture flow here so
-        # the visitor is still captured rather than dropped. Until that exists
-        # this is an honest failure, not a silent one.
-        log.error("ladder exhausted", extra={"error": str(e)})
-        await websocket.send_json(
-            {
-                "type": "error",
-                "message": "I can't reach my brain right now. Please try again shortly.",
-            }
+        # §6: never drop the caller. Switch to the scripted interview, which
+        # needs no model, no quota and no synthesis. The product degrades to a
+        # transcribing voicemail rather than an outage.
+        log.warning("ladder exhausted, entering degraded capture", extra={"error": str(e)})
+        conversation.degraded = DegradedCapture()
+        await _say(
+            websocket, conversation, conversation.degraded.open(), model="degraded-capture"
         )
     except StreamInterrupted as e:
         log.error("stream interrupted", extra={"error": str(e)})

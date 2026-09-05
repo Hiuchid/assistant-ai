@@ -25,6 +25,7 @@ from typing import Literal, Self, TypedDict
 import httpx
 
 from ..config import LadderRung, Settings
+from ..quota import QuotaLedger, estimate_tokens, parse_reset
 
 log = logging.getLogger("assistant.llm")
 
@@ -81,6 +82,7 @@ class GroqLadder:
         Nothing in production passes it.
         """
         self._settings = settings
+        self.ledger = QuotaLedger(settings.ladder)
         self._client = httpx.AsyncClient(
             base_url=settings.groq_base_url,
             transport=transport,
@@ -130,11 +132,25 @@ class GroqLadder:
         Yields Token events followed by exactly one Completed event.
         """
         failures: list[str] = []
+        estimated = estimate_tokens(
+            [m["content"] for m in messages], max_output=self._settings.llm_max_tokens
+        )
 
         for rung in self._settings.ladder:
+            # §6: consult the ledger before dispatch. A rung we already know is
+            # exhausted costs a full round-trip to rediscover, and the 429 that
+            # comes back lands on the caller's latency, not ours.
+            if (refusal := self.ledger.refusal(rung, estimated)) is not None:
+                failures.append(f"{rung.model}: {refusal}")
+                log.info(
+                    "skipping rung on predicted quota",
+                    extra={"model": rung.model, "reason": refusal},
+                )
+                continue
+
             emitted = False
             try:
-                async for event in self._stream_one(rung, messages):
+                async for event in self._stream_one(rung, messages, estimated):
                     if isinstance(event, Token):
                         emitted = True
                     yield event
@@ -167,20 +183,32 @@ class GroqLadder:
         raise LadderExhausted("; ".join(failures))
 
     async def _stream_one(
-        self, rung: LadderRung, messages: Sequence[Message]
+        self, rung: LadderRung, messages: Sequence[Message], estimated: int
     ) -> AsyncIterator[Event]:
         started = time.perf_counter()
         first_token_ms = 0.0
         prompt_tokens = completion_tokens = 0
+        quota = self.ledger.get(rung)
+
+        # Charge the estimate up front. If two turns dispatch concurrently,
+        # the second must see the first's cost even though no response has
+        # come back yet. reconcile() corrects it to the real figure below.
+        quota.record_dispatch(estimated)
 
         async with self._client.stream(
             "POST", "/chat/completions", json=self._payload(rung, messages)
         ) as response:
             if response.status_code != 200:
                 body = (await response.aread()).decode(errors="replace")[:300]
+                if response.status_code == 429:
+                    # Trust the provider over our own estimate: it just told us
+                    # exactly how long this bucket is unusable for.
+                    retry_after = parse_reset(response.headers.get("retry-after"))
+                    quota.mark_cold(retry_after if retry_after is not None else 60.0)
                 raise _RungUnavailable(
                     _describe_http_error(response.status_code, response.headers, body)
                 )
+            headers = response.headers
 
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
@@ -209,6 +237,17 @@ class GroqLadder:
                         if first_token_ms == 0.0:
                             first_token_ms = (time.perf_counter() - started) * 1000
                         yield Token(text)
+
+        # The provider's own figures are authoritative -- they account for usage
+        # from anywhere sharing this key, not just this process.
+        quota.reconcile(
+            remaining_requests=headers.get("x-ratelimit-remaining-requests"),
+            remaining_tokens=headers.get("x-ratelimit-remaining-tokens"),
+            reset_requests=headers.get("x-ratelimit-reset-requests"),
+            reset_tokens=headers.get("x-ratelimit-reset-tokens"),
+            actual_tokens=prompt_tokens + completion_tokens,
+            estimated_tokens=estimated,
+        )
 
         total_ms = (time.perf_counter() - started) * 1000
         log.info(

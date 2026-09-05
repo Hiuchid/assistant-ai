@@ -785,6 +785,30 @@ Deliberately placed before voice work: cheap, and it determines viability at rea
 **Done when:** with all models forced to zero remaining quota, a conversation still
 completes, still captures details, and still produces exactly one item.
 
+**[r5] ✅ DONE 2026-09-05.** Verified live with all four rungs zeroed: the full scripted
+interview ran, captured name, reason, contact and preferred time, and closed cleanly. The
+logs show all four rungs skipped in under a millisecond with **zero HTTP requests made** —
+predicted exhaustion, not discovered. Limits restored and normal operation confirmed.
+
+24 new tests (29 total), `ruff` and `mypy --strict` clean, no ignores.
+
+**[r5] Two deviations from this section as written, both deliberate:**
+
+- **Windows are sliding, not aligned to the provider's wall clock.** Reconciling against
+  Groq's own `x-ratelimit-reset-*` headers is strictly better than guessing when its day
+  rolls over, and the headers are authoritative — they account for usage from anywhere
+  sharing the key. The local sliding windows are the fallback before the first response of
+  a window, and sliding never over-estimates availability, so it errs toward refusing
+  early. That is the safe direction when the alternative is dropping a caller.
+- **A conversation never leaves degraded mode once it enters.** Switching personas
+  mid-call would be jarring and the interview is only four questions long.
+
+**[r5] Still missing:** the item is *produced* by `DegradedCapture` (`title()`, `summary()`,
+`contact()`) but nothing persists it yet — there is no database until Phase 4. The
+acceptance criterion's "exactly one item" is enforced by the unique constraint on
+`tickets.conversation_id`, which does not exist yet either. **Re-verify this end to end at
+Phase 5**, when the summarizer and the degraded path both write rows.
+
 ### Phase 2 — TTS layer
 
 `TTSBackend` with both implementations and the disk cache. Sentence-boundary splitting on

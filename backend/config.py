@@ -26,8 +26,16 @@ class LadderRung(BaseModel):
     # finish_reason=length -- silently. "low" is required on those; "none" is
     # rejected by the API. qwen and compound are not reasoning models.
     reasoning_effort: ReasoningEffort | None = None
+
+    # Limits feeding the quota ledger (§6). requests_per_day and
+    # tokens_per_minute were read from live response headers on this account;
+    # requests_per_minute and tokens_per_day come from Groq's published table
+    # and are NOT exposed in the headers, so treat them as unverified. They are
+    # deliberately conservative -- the ledger errs toward refusing early.
+    requests_per_minute: int = 30
     requests_per_day: int
     tokens_per_minute: int
+    tokens_per_day: int = 200_000
     note: str = ""
 
 
@@ -60,6 +68,10 @@ DEFAULT_LADDER: tuple[LadderRung, ...] = (
         model="groq/compound-mini",
         requests_per_day=250,
         tokens_per_minute=70000,
+        # Not published for this model. Held low on purpose: the ~470-token
+        # preamble makes every call expensive, and this is the last rung
+        # standing between a caller and the degraded script.
+        tokens_per_day=100_000,
         note="last resort: ~470-token agentic preamble, only 250 req/day",
     ),
 )

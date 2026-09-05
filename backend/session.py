@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .degraded import DegradedCapture
 from .providers.llm import Message
 
 Role = Literal["customer", "agent"]
@@ -42,6 +43,11 @@ class Conversation:
     turns: list[Turn] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)
+
+    # Set once the ladder is exhausted (§6). A conversation never comes back out
+    # of degraded mode: switching personas mid-call would be jarring, and the
+    # scripted interview is only a few questions from finishing anyway.
+    degraded: DegradedCapture | None = None
 
     def add(self, role: Role, text: str, *, cancelled: bool = False) -> None:
         self.turns.append(Turn(role=role, text=text, cancelled=cancelled))
