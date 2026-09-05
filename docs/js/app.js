@@ -6,6 +6,9 @@
 
 import { startWidget } from "./widget.js";
 import { registerServiceWorker, enablePush, sendTestPush, pushStatus } from "./pwa.js";
+import {
+  loadSnapshot, saveSnapshot, forgetSnapshot, enqueue, flush, pending, newId,
+} from "./sync.js";
 
 const API = "https://assistant-ai.duckdns.org";
 const SESSION_KEY = "assistant.session";
@@ -47,14 +50,107 @@ function forget(key) {
   try { localStorage.removeItem(key); } catch { /* ignore */ }
 }
 
+// Two kinds of failure, and the difference decides everything downstream: a
+// request that never left the device is retried when the connection returns,
+// one the server answered and refused is not.
 async function api(path, options = {}) {
-  const res = await fetch(API + path, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
-  });
-  if (res.status === 401) { signOut(); throw new Error("session expired"); }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  let res;
+  try {
+    res = await fetch(API + path, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    const err = new Error("offline");
+    err.network = true;
+    throw err;
+  }
+  if (res.status === 401) { sessionExpired(); throw new Error("session expired"); }
+  if (!res.ok) {
+    const err = new Error(`HTTP ${res.status}`);
+    // 4xx is the server saying no. Replaying it forever would block every
+    // write queued behind it, so the queue drops it instead.
+    err.rejected = res.status < 500;
+    throw err;
+  }
+  // 204 and friends have no body to read.
+  return res.status === 204 ? {} : res.json();
+}
+
+// ------------------------------------------------------------------- writes
+//
+// Every change goes through here: applied on the device, queued, then sent.
+// That order is the whole trick -- the app behaves identically with or without
+// a connection, and the network is something that happens afterwards.
+
+let offline = false;
+let flushPromise = null;
+let syncNote = "";
+
+function mutate(op, applyLocally) {
+  applyLocally();
+  if (!enqueue(op)) {
+    // Storage is full or blocked. Send it directly and say so if that fails,
+    // rather than pretending it was saved.
+    api(op.path, requestOf(op)).catch(() => {
+      alert("That change could not be saved. Check your connection and try again.");
+    });
+  }
+  renderActive();
+  updateSyncState();
+  flushOutbox();
+}
+
+function requestOf(op) {
+  return {
+    method: op.method,
+    headers: op.body ? { "Content-Type": "application/json" } : undefined,
+    body: op.body ? JSON.stringify(op.body) : undefined,
+  };
+}
+
+// One run at a time, and anyone who asks for a flush while one is going gets
+// that run's promise. Two concurrent drains of the same ordered queue would
+// race to send the same operation twice.
+function flushOutbox() {
+  if (!token || !pending()) return Promise.resolve();
+  if (flushPromise) return flushPromise;
+  flushPromise = (async () => {
+    try {
+      const result = await flush((op) => api(op.path, requestOf(op)));
+      offline = result.stalled;
+      if (result.dropped.length) {
+        syncNote = `${result.dropped.length} change${
+          result.dropped.length === 1 ? " was" : "s were"} refused`;
+        console.warn("sync dropped", result.dropped);
+      }
+    } catch (e) {
+      if (e.message !== "session expired") console.warn(e);
+    } finally {
+      flushPromise = null;
+      updateSyncState();
+    }
+  })();
+  return flushPromise;
+}
+
+function renderActive() {
+  const active = document.querySelector(".tab[aria-selected='true']");
+  if (!active) return;
+  if (active.dataset.view === "today") renderToday();
+  if (active.dataset.view === "inbox") renderInbox();
+  if (active.dataset.view === "planner") renderPlanner();
+}
+
+function updateSyncState() {
+  const queued = pending();
+  const fresh = items.filter((i) => i.status === "new").length;
+  $("appSub").textContent =
+    syncNote ? syncNote
+    : queued ? `${queued} change${queued === 1 ? "" : "s"} to send`
+    : offline ? "offline"
+    : fresh ? `${fresh} waiting`
+    : "at your service";
 }
 
 function ago(iso) {
@@ -290,19 +386,14 @@ function openItem(it) {
     async () => {
       const status = chipValue("status");
       if (status && status !== it.status) {
-        await api(`/api/items/${it.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status }),
-        });
+        mutate({ method: "PATCH", path: `/api/items/${it.id}`, body: { status } },
+               () => { it.status = status; });
       }
       const project = $("f-project").value || null;
       if (project !== (it.project_id || null)) {
-        await api(`/api/items/${it.id}/project`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ project_id: project }),
-        });
+        mutate({ method: "PUT", path: `/api/items/${it.id}/project`,
+                 body: { project_id: project } },
+               () => { it.project_id = project; });
       }
     },
     { danger: "Delete" });
@@ -313,9 +404,9 @@ function openItem(it) {
     const who = contactName(it);
     if (!confirm(`Delete this message${who ? ` from ${who}` : ""}?\n\n` +
                  "The transcript goes with it. This cannot be undone.")) return;
-    await api(`/api/items/${it.id}`, { method: "DELETE" });
+    mutate({ method: "DELETE", path: `/api/items/${it.id}` },
+           () => { items = items.filter((x) => x.id !== it.id); });
     closeSheet();
-    await refresh();
   });
 
   // Fetched on open rather than with the list: it is by far the largest field
@@ -537,30 +628,52 @@ function openTask(task, dayHint) {
         project_id: $("f-project").value || null,
       };
       if (!payload.title) throw new Error("give it a name");
-      await api(task ? `/api/tasks/${task.id}` : "/api/tasks", {
-        method: task ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      if (task) {
+        mutate({ method: "PATCH", path: `/api/tasks/${task.id}`, body: payload },
+               () => Object.assign(task, payload));
+      } else {
+        const id = newId();
+        mutate({ method: "POST", path: "/api/tasks", body: { id, ...payload } },
+               () => tasks.push({
+                 id, ...payload, done_at: null, completed_count: 0,
+                 ticket_id: null, source: "owner",
+                 created_at: new Date().toISOString(),
+               }));
+      }
     },
     { danger: task ? "Archive" : "" });
 
   if (task) {
-    $("sheetForm").querySelector("[data-danger]").addEventListener("click", async () => {
-      await api(`/api/tasks/${task.id}/archive`, { method: "POST" });
+    $("sheetForm").querySelector("[data-danger]").addEventListener("click", () => {
+      mutate({ method: "POST", path: `/api/tasks/${task.id}/archive` },
+             () => { tasks = tasks.filter((t) => t.id !== task.id); });
       closeSheet();
-      await refresh();
     });
   }
 }
 
-async function toggleTask(task) {
-  await api(`/api/tasks/${task.id}/done`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ done: !task.done_at }),
-  });
-  await refresh();
+function toggleTask(task) {
+  const done = !task.done_at;
+  mutate({ method: "POST", path: `/api/tasks/${task.id}/done`, body: { done } },
+         () => applyToggle(task, done));
+}
+
+// Mirrors what the server does to a repeating task, so the row on screen does
+// not disagree with the row in Postgres for as long as the queue takes to
+// drain -- and so a repeat ticked off on a plane still shows its next date.
+function applyToggle(task, done) {
+  if (done && task.repeat_days && task.due_at) {
+    const next = new Date(task.due_at);
+    do {
+      next.setDate(next.getDate() + task.repeat_days);
+    } while (next <= Date.now());
+    task.due_at = next.toISOString();
+    task.done_at = null;
+    task.completed_count = (task.completed_count || 0) + 1;
+  } else {
+    task.done_at = done ? new Date().toISOString() : null;
+    if (done) task.completed_count = (task.completed_count || 0) + 1;
+  }
 }
 
 // ---------------------------------------------------------- event editing
@@ -607,24 +720,26 @@ function openEvent(event, dayHint) {
       if (!title) throw new Error("give it a name");
       // Events have no PATCH: an edit is a cancel and a re-create, which keeps
       // one code path on the server for something changed a handful of times.
-      if (event) await api(`/api/events/${event.id}`, { method: "DELETE" });
-      await api("/api/events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title, starts_at: startsAt, ends_at: endsAt,
-          location: $("f-loc").value.trim() || null,
-          notes: $("f-notes").value.trim() || null,
-        }),
-      });
+      // Both halves queue in order, so an edit made offline replays as an edit.
+      const body = {
+        id: newId(), title, starts_at: startsAt, ends_at: endsAt,
+        location: $("f-loc").value.trim() || null,
+        notes: $("f-notes").value.trim() || null,
+      };
+      if (event) {
+        mutate({ method: "DELETE", path: `/api/events/${event.id}` },
+               () => { events = events.filter((e) => e.id !== event.id); });
+      }
+      mutate({ method: "POST", path: "/api/events", body },
+             () => events.push({ ...body, source: "owner" }));
     },
     { danger: event ? "Cancel event" : "" });
 
   if (event) {
-    $("sheetForm").querySelector("[data-danger]").addEventListener("click", async () => {
-      await api(`/api/events/${event.id}`, { method: "DELETE" });
+    $("sheetForm").querySelector("[data-danger]").addEventListener("click", () => {
+      mutate({ method: "DELETE", path: `/api/events/${event.id}` },
+             () => { events = events.filter((e) => e.id !== event.id); });
       closeSheet();
-      await refresh();
     });
   }
 }
@@ -666,19 +781,32 @@ function openProject(project) {
         due_at: $("f-due").value ? toIso($("f-due").value, "09:00") : null,
       };
       if (project) payload.status = chipValue("status") || "active";
-      await api(project ? `/api/projects/${project.id}` : "/api/projects", {
-        method: project ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      if (project) {
+        mutate({ method: "PATCH", path: `/api/projects/${project.id}`, body: payload },
+               () => Object.assign(project, payload));
+      } else {
+        const id = newId();
+        mutate({ method: "POST", path: "/api/projects", body: { id, ...payload } },
+               () => projects.push({
+                 id, ...payload, status: "active", source: "owner",
+                 tasks: 0, tasks_done: 0, items: 0,
+                 created_at: new Date().toISOString(),
+               }));
+      }
     },
     { danger: project ? "Archive" : "" });
 
   if (project) {
-    $("sheetForm").querySelector("[data-danger]").addEventListener("click", async () => {
-      await api(`/api/projects/${project.id}/archive`, { method: "POST" });
+    $("sheetForm").querySelector("[data-danger]").addEventListener("click", () => {
+      mutate({ method: "POST", path: `/api/projects/${project.id}/archive` },
+             () => {
+               projects = projects.filter((p) => p.id !== project.id);
+               // The server unfiles them rather than deleting them; do the same
+               // here so the app does not show a project that is gone.
+               for (const t of tasks) if (t.project_id === project.id) t.project_id = null;
+               for (const i of items) if (i.project_id === project.id) i.project_id = null;
+             });
       closeSheet();
-      await refresh();
     });
   }
 }
@@ -1001,8 +1129,26 @@ $("view-planner").addEventListener("click", async (e) => {
 
 // -------------------------------------------------------------- Settings
 
+// The standing instructions the visitor-facing assistant is given. The box
+// has been in the page since it was built and was never connected to anything,
+// so whatever was typed in it went nowhere.
+let briefing = null;
+
 async function renderSettings() {
   $("acctEmail").textContent = read(EMAIL_KEY) || "signed in";
+
+  if (briefing === null) {
+    try {
+      briefing = (await api("/api/briefing")).briefing || "";
+      $("briefing").value = briefing;
+      $("briefingState").textContent = "";
+    } catch (e) {
+      briefing = null;
+      $("briefingState").textContent = e.network
+        ? "Cannot load while offline."
+        : "Could not load.";
+    }
+  }
 
   const state = await pushStatus();
   const label = {
@@ -1043,44 +1189,69 @@ async function renderSettings() {
     $("svcState").textContent = "Service is up";
     $("svcDetail").textContent = `v${h.version} · ${h.active_sessions} active`;
   } catch {
-    $("svcState").textContent = "Service unreachable";
-    $("svcDetail").textContent = "The assistant cannot be contacted.";
+    $("svcState").textContent = navigator.onLine
+      ? "Service unreachable" : "Offline";
+    $("svcDetail").textContent = navigator.onLine
+      ? "The assistant cannot be contacted."
+      : "Your changes are saved here and will sync when you reconnect.";
   }
 }
+
+$("saveBriefing").addEventListener("click", () => {
+  const text = $("briefing").value.trim().slice(0, 1200);
+  mutate({ method: "PUT", path: "/api/briefing", body: { briefing: text } },
+         () => { briefing = text; });
+  $("briefingState").textContent = pending() ? "Saved here; will sync." : "Saved.";
+  setTimeout(() => { $("briefingState").textContent = ""; }, 4000);
+});
 
 // ------------------------------------------------------------------ data
 
 async function refresh() {
+  if (!token) return;
+  // Send what is waiting before asking for the truth. The server's answer is
+  // only the truth once it has heard everything this device has to say.
+  await flushOutbox();
+  if (pending()) { badges(); renderActive(); return; }
+
   try {
-    // Everything, filtered client-side: the whole set is small and it makes
-    // Today, Inbox and Reminders consistent without three round trips.
+    // Everything at once, filtered client-side: the whole set is small, it
+    // keeps Today, Inbox and Planner consistent, and it is exactly the shape
+    // that gets written to the offline snapshot.
     const [itemData, eventData, taskData, projectData] = await Promise.all([
       api("/api/items"),
       // A year forward and six months back, so paging the calendar into the
       // past shows what was actually there.
-      api("/api/events?days=365&back=180").catch(() => ({ events: [] })),
-      api("/api/tasks").catch(() => ({ tasks: [] })),
-      api("/api/projects").catch(() => ({ projects: [] })),
+      api("/api/events?days=365&back=180"),
+      api("/api/tasks"),
+      api("/api/projects"),
     ]);
     items = itemData.items;
     events = eventData.events;
     tasks = taskData.tasks;
     projects = projectData.projects;
-    const dueNow =
-      items.filter((i) => i.due_at && new Date(i.due_at) <= Date.now() && i.status !== "done").length
-      + tasks.filter((t) => !t.done_at && t.due_at && new Date(t.due_at) <= Date.now()).length;
-    const fresh = items.filter((i) => i.status === "new").length;
-    badge("inboxBadge", fresh);
-    badge("dueBadge", dueNow);
-    $("appSub").textContent = fresh ? `${fresh} waiting` : "at your service";
-
-    const active = document.querySelector(".tab[aria-selected='true']").dataset.view;
-    if (active === "today") renderToday();
-    if (active === "inbox") renderInbox();
-    if (active === "planner") renderPlanner();
+    saveSnapshot({ items, events, tasks, projects });
+    offline = false;
+    syncNote = "";
   } catch (e) {
-    if (e.message !== "session expired") console.warn(e);
+    if (e.message === "session expired") return;
+    // A request that never left the device is a connection problem, and the
+    // snapshot already on screen stays. Anything else is a real fault worth
+    // seeing in the console.
+    offline = Boolean(e.network);
+    if (!e.network) console.warn(e);
   }
+  badges();
+  renderActive();
+  updateSyncState();
+}
+
+function badges() {
+  const dueNow =
+    items.filter((i) => i.due_at && new Date(i.due_at) <= Date.now() && i.status !== "done").length
+    + tasks.filter((t) => !t.done_at && t.due_at && new Date(t.due_at) <= Date.now()).length;
+  badge("inboxBadge", items.filter((i) => i.status === "new").length);
+  badge("dueBadge", dueNow);
 }
 
 function badge(id, n) {
@@ -1091,7 +1262,28 @@ function badge(id, n) {
 
 // ------------------------------------------------------------------ auth
 
+// An expired token is not the same as choosing to leave. Reloading the page
+// for it -- which is what used to happen -- threw away the loaded app and, if
+// anything about the reload went wrong, left a blank screen behind the login
+// dialog. Now the app stays exactly where it is, the dialog comes back, and
+// signing in picks up where it left off. The snapshot and the outbox are kept:
+// unsent work must survive a token expiring.
+function sessionExpired() {
+  forget(SESSION_KEY);
+  token = "";
+  clearInterval(poll);
+  requireLogin();
+}
+
 function signOut() {
+  // Signing out clears the device's copy, and anything still queued goes with
+  // it. That is only ever a surprise, so it is asked about first.
+  if (pending() && !confirm(
+      `${pending()} change${pending() === 1 ? " has" : "s have"} not reached the ` +
+      "server yet. Signing out now will lose them. Continue?")) {
+    return;
+  }
+  forgetSnapshot();
   forget(SESSION_KEY);
   forget(EMAIL_KEY);
   clearInterval(poll);
@@ -1107,9 +1299,25 @@ function launch(t) {
   if ($("loginDialog").open) $("loginDialog").close();
   // The app is not in the page until there is a session to view it with.
   $("shell").hidden = false;
+
+  // Draw from the last snapshot before asking the network for anything. The
+  // app opens with content on a train, and opens instantly everywhere else.
+  const snap = loadSnapshot();
+  if (snap) {
+    items = snap.items;
+    events = snap.events;
+    tasks = snap.tasks;
+    projects = snap.projects;
+  }
   show("today");
+  badges();
+  updateSyncState();
   refresh();
   poll = setInterval(refresh, POLL_MS);
+  // The browser's own signal, which beats waiting up to twenty seconds for the
+  // next poll to notice the connection is back.
+  window.addEventListener("online", () => { offline = false; refresh(); });
+  window.addEventListener("offline", () => { offline = true; updateSyncState(); });
 }
 
 $("loginForm").addEventListener("submit", async (e) => {

@@ -38,20 +38,14 @@
         <span class="card-go">Open →</span>
       </a>
 
-      <a class="card locked" href="app.html" data-needs-auth>
+      <!-- Not shown at all until there is a session. Advertising the owner's
+           app to everyone who is given the message link, complete with a
+           "sign in required" badge, tells a stranger exactly where to knock. -->
+      <a class="card" href="app.html" data-needs-auth hidden>
         <span class="card-icon">🎩</span>
         <h2>Assistant</h2>
         <p>Talk to it, read the inbox, keep reminders. One app.</p>
         <span class="card-go">Open →</span>
-        <span class="card-lock">Sign in required</span>
-      </a>
-
-      <a class="card locked" href="app.html#inbox" data-needs-auth>
-        <span class="card-icon">📥</span>
-        <h2>Inbox</h2>
-        <p>Everything taken down, from both sides. Opens in the app.</p>
-        <span class="card-go">Open →</span>
-        <span class="card-lock">Sign in required</span>
       </a>
     </div>
 
@@ -80,12 +74,18 @@
 <script type="module">
 const API = "https://assistant-ai.duckdns.org";
 const SESSION_KEY = "assistant.session";
+const EMAIL_KEY = "assistant.email";
 
 const $ = (id) => document.getElementById(id);
 const dialog = $("loginDialog");
 
+// localStorage, and the same key the app uses.
+//
+// This was sessionStorage, which is a different box entirely -- so signing in
+// here put the token somewhere app.html never looks, and the app asked for the
+// password a second time the moment you arrived. One sign-in, one place.
 function token() {
-  try { return sessionStorage.getItem(SESSION_KEY) || ""; } catch { return ""; }
+  try { return localStorage.getItem(SESSION_KEY) || ""; } catch { return ""; }
 }
 
 function paint() {
@@ -93,21 +93,10 @@ function paint() {
   $("signIn").hidden = signedIn;
   $("signOut").hidden = !signedIn;
   $("who").hidden = !signedIn;
+  $("who").textContent = signedIn ? (localStorage.getItem(EMAIL_KEY) || "") : "";
   for (const card of document.querySelectorAll("[data-needs-auth]")) {
-    card.classList.toggle("locked", !signedIn);
+    card.hidden = !signedIn;
   }
-}
-
-// The locked cards are still real links -- each page has its own sign-in, so
-// following one without a session is a detour rather than a dead end. The
-// dialog is only a shortcut.
-for (const card of document.querySelectorAll("[data-needs-auth]")) {
-  card.addEventListener("click", (e) => {
-    if (token()) return;
-    e.preventDefault();
-    dialog.returnValue = card.getAttribute("href");
-    dialog.showModal();
-  });
 }
 
 $("signIn").addEventListener("click", () => {
@@ -116,7 +105,10 @@ $("signIn").addEventListener("click", () => {
 });
 
 $("signOut").addEventListener("click", () => {
-  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(EMAIL_KEY);
+  } catch { /* ignore */ }
   $("status").textContent = "Signed out.";
   paint();
 });
@@ -144,13 +136,15 @@ $("loginForm").addEventListener("submit", async (e) => {
       return;
     }
     const { token: t } = await res.json();
-    try { sessionStorage.setItem(SESSION_KEY, t); } catch { /* private mode */ }
+    try {
+      localStorage.setItem(SESSION_KEY, t);
+      localStorage.setItem(EMAIL_KEY, $("email").value);
+    } catch { /* private mode */ }
     dialog.close("");
     paint();
-    // If they were headed somewhere, take them there rather than dropping them
-    // back on the landing page to click twice.
-    if (destination) location.href = destination;
-    else $("status").textContent = "Signed in.";
+    // Straight into the app: signing in on this page is only ever a way of
+    // getting there.
+    location.href = destination || "app.html";
   } catch {
     err.textContent = "Could not reach the server.";
   } finally {

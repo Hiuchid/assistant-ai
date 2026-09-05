@@ -1,14 +1,18 @@
-// Service worker: push notifications, and just enough caching to make the
-// installed app open instantly rather than staring at white.
+// Service worker: push notifications, and the shell that lets the app open
+// with no network at all.
 //
-// Deliberately NOT an offline-first cache. This app is a thin client over a
-// WebSocket -- with no network there is nothing to say and nothing to show, so
-// pretending otherwise would only produce a convincing but useless shell.
+// It used to say this was deliberately not an offline cache, on the grounds
+// that the app was a thin client over a WebSocket. That stopped being true:
+// the planner works on the device and syncs afterwards (js/sync.js), so the
+// shell has to be there to run it. Talk still needs a connection, and says so
+// rather than pretending.
+//
+// API responses are still never cached. The data the app shows offline is its
+// own snapshot, written by code that knows what is stale and what is queued --
+// a cached HTTP response knows neither.
 
-const CACHE = "assistant-v2";
+const CACHE = "assistant-v3";
 
-// The shell only. Never cache API responses: a stale inbox that looks current
-// is worse than one that admits it cannot load.
 const SHELL = [
   "./",
   "./index.html",
@@ -18,6 +22,7 @@ const SHELL = [
   "./css/shell.css",
   "./js/widget.js",
   "./js/app.js",
+  "./js/sync.js",
   "./js/pwa.js",
   "./manifest.json",
   "./icons/icon-192.png",
@@ -26,8 +31,13 @@ const SHELL = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE)
-      // Individually, so one 404 does not fail the whole install.
-      .then((c) => Promise.allSettled(SHELL.map((u) => c.add(u))))
+      // Individually, so one 404 does not fail the whole install. `reload`
+      // bypasses the browser's own HTTP cache -- GitHub Pages serves these
+      // with a ten-minute max-age, so without it a fresh deploy could install
+      // a mix of new HTML and last version's JavaScript.
+      .then((c) => Promise.allSettled(
+        SHELL.map((u) => c.add(new Request(u, { cache: "reload" }))),
+      ))
       .then(() => self.skipWaiting()),
   );
 });
@@ -49,9 +59,14 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
 
   // Network first, cache as the fallback: the shell is small and correctness
-  // beats the few milliseconds a cache-first would save.
+  // beats the few milliseconds a cache-first would save. `no-cache` makes that
+  // network request revalidate rather than be answered from the browser's own
+  // ten-minute copy, which is what left the app running yesterday's script
+  // after a deploy.
   event.respondWith(
-    fetch(event.request)
+    fetch(new Request(event.request.url, {
+      cache: "no-cache", credentials: "same-origin",
+    }))
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();

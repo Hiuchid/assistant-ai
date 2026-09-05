@@ -26,15 +26,30 @@ log = logging.getLogger("assistant.tts.edge")
 MIME = "audio/mpeg"
 SAMPLE_RATE = 24000
 
+# The shadda, which doubles the consonant it sits on.
+#
+# ar-LB-Rami reads straight past it and says a different word. Measured (§14):
+# "أوصّل" (awassel, "pass it on") came back from Whisper as "أصل" every time,
+# at every speaking rate -- and the same sentence written without the shadda
+# came back correct every time. Lebanese Arabic is commonly written with it, so
+# the model produces it constantly.
+#
+# Removing it costs nothing: it is a pronunciation hint, not a letter, and the
+# voice was ignoring it in the worst possible way. Whisper's own transcripts
+# and the stored text are untouched -- this is only what is handed to the
+# speech synthesiser.
+SHADDA = "ّ"
+
 
 class EdgeTTS:
     name = "edge"
 
     async def synthesize(self, text: str, voice: str, prosody: Prosody) -> Audio:
+        spoken = text.replace(SHADDA, "") if SHADDA in text else text
         chunks: list[bytes] = []
         try:
             stream = edge_tts.Communicate(
-                text, voice, rate=prosody.rate, pitch=prosody.pitch
+                spoken, voice, rate=prosody.rate, pitch=prosody.pitch
             ).stream()
             async for chunk in stream:
                 if chunk["type"] == "audio":

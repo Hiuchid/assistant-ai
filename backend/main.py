@@ -596,6 +596,7 @@ async def update_item(
 
 
 class EventIn(BaseModel):
+    id: ClientId = None
     title: str
     starts_at: datetime
     ends_at: datetime | None = None
@@ -629,6 +630,7 @@ async def create_event(
         title=body.title[:200], starts_at=body.starts_at,
         ends_at=body.ends_at or body.starts_at + timedelta(hours=1),
         location=body.location, notes=body.notes, ticket_id=None, source="owner",
+        event_id=body.id or None,
     )
 
 
@@ -705,7 +707,16 @@ async def delete_item(
 # cover the ones that did; see 006_planner.sql for why they stayed apart.
 
 
+# The app may choose the id. It has to when it is offline: the row it drew on
+# screen and the row that reaches Postgres have to be the same row, or an edit
+# made before the sync would be addressed to something that does not exist. It
+# also makes a replayed create harmless -- the insert conflicts and returns the
+# row that is already there rather than making a second one.
+ClientId = Annotated[str | None, Field(default=None, max_length=36)]
+
+
 class TaskIn(BaseModel):
+    id: ClientId = None
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
     priority: Literal["low", "med", "high"] = "med"
@@ -758,7 +769,7 @@ async def create_task(
         title=body.title.strip(), notes=body.notes, priority=body.priority,
         due_at=body.due_at, all_day=body.all_day, repeat_days=body.repeat_days,
         project_id=body.project_id or None, ticket_id=body.ticket_id or None,
-        source="owner",
+        source="owner", task_id=body.id or None,
     )
 
 
@@ -803,6 +814,7 @@ async def archive_task(
 
 
 class ProjectIn(BaseModel):
+    id: ClientId = None
     name: str = Field(min_length=1, max_length=120)
     emoji: str = Field(default="\U0001f4c1", max_length=8)
     colour: Literal["violet", "blue", "green", "amber", "red", "grey"] = "violet"
@@ -843,6 +855,7 @@ async def create_project(
     return await _require_store().create_project(
         name=body.name.strip(), emoji=body.emoji, colour=body.colour,
         notes=body.notes, due_at=body.due_at, source="owner",
+        project_id=body.id or None,
     )
 
 

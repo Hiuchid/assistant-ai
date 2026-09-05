@@ -491,18 +491,30 @@ class Store:
     async def create_event(
         self, *, title: str, starts_at: datetime, ends_at: datetime | None,
         location: str | None, notes: str | None, ticket_id: str | None,
-        source: str = "owner",
+        source: str = "owner", event_id: str | None = None,
     ) -> dict[str, Any]:
+        """Create an event, optionally at a caller-chosen id (see
+        create_task for why)."""
+        cols = ("id::text as id, title, starts_at, ends_at, location, notes, "
+                "source, project_id::text as project_id")
         row = await self.pool.fetchrow(
-            """
-            insert into events (title, starts_at, ends_at, location, notes,
+            f"""
+            insert into events (id, title, starts_at, ends_at, location, notes,
                                 ticket_id, source)
-            values ($1, $2, $3, $4, $5, $6::uuid, $7)
-            returning id::text as id, title, starts_at, ends_at, location,
-                      notes, source
+            values (coalesce($8::uuid, gen_random_uuid()),
+                    $1, $2, $3, $4, $5, $6::uuid, $7)
+            on conflict (id) do nothing
+            returning {cols}
             """,
             title, starts_at, ends_at, location, notes, ticket_id, source,
+            event_id,
         )
+        if row is None and event_id:
+            existing = await self.pool.fetchrow(
+                f"select {cols} from events where id = $1::uuid", event_id
+            )
+            if existing is not None:
+                return dict(existing)
         if row is None:
             raise PersistenceError("event insert returned nothing")
         return dict(row)
@@ -582,17 +594,33 @@ class Store:
         due_at: datetime | None = None, all_day: bool = True,
         repeat_days: int = 0, project_id: str | None = None,
         ticket_id: str | None = None, source: str = "owner",
+        task_id: str | None = None,
     ) -> dict[str, Any]:
+        """Create a task, optionally at an id the caller chose.
+
+        The app generates the id when it is offline, so the row it drew on
+        screen and the row that eventually reaches Postgres are the same row --
+        and so replaying a queued create that already got through is a no-op
+        rather than a duplicate.
+        """
         row = await self.pool.fetchrow(
             f"""
-            insert into tasks (title, notes, priority, due_at, all_day,
+            insert into tasks (id, title, notes, priority, due_at, all_day,
                                repeat_days, project_id, ticket_id, source)
-            values ($1, $2, $3, $4, $5, $6, $7::uuid, $8::uuid, $9)
+            values (coalesce($10::uuid, gen_random_uuid()),
+                    $1, $2, $3, $4, $5, $6, $7::uuid, $8::uuid, $9)
+            on conflict (id) do nothing
             returning {self._TASK_COLS}
             """,
             title, notes, priority, due_at, all_day, repeat_days,
-            project_id, ticket_id, source,
+            project_id, ticket_id, source, task_id,
         )
+        if row is None and task_id:
+            # Already there: the same create arrived twice, which is exactly
+            # what the queue is allowed to do.
+            existing = await self.get_task(task_id)
+            if existing is not None:
+                return existing
         if row is None:
             raise PersistenceError("task insert returned nothing")
         return dict(row)
@@ -750,16 +778,28 @@ class Store:
     async def create_project(
         self, *, name: str, emoji: str = "\U0001f4c1", colour: str = "violet",
         notes: str | None = None, due_at: datetime | None = None,
-        source: str = "owner",
+        source: str = "owner", project_id: str | None = None,
     ) -> dict[str, Any]:
+        """Create a project, optionally at a caller-chosen id (see
+        create_task for why)."""
         row = await self.pool.fetchrow(
             f"""
-            insert into projects as p (name, emoji, colour, notes, due_at, source)
-            values ($1, $2, $3, $4, $5, $6)
+            insert into projects as p
+                   (id, name, emoji, colour, notes, due_at, source)
+            values (coalesce($7::uuid, gen_random_uuid()),
+                    $1, $2, $3, $4, $5, $6)
+            on conflict (id) do nothing
             returning {self._PROJECT_COLS}
             """,
-            name, emoji, colour, notes, due_at, source,
+            name, emoji, colour, notes, due_at, source, project_id,
         )
+        if row is None and project_id:
+            existing = await self.pool.fetchrow(
+                f"select {self._PROJECT_COLS} from projects p where p.id = $1::uuid",
+                project_id,
+            )
+            if existing is not None:
+                return dict(existing)
         if row is None:
             raise PersistenceError("project insert returned nothing")
         return dict(row)
