@@ -67,8 +67,30 @@ class ToolStore(Protocol):
         location: str | None, notes: str | None, ticket_id: str | None,
         source: str = ...,
     ) -> dict[str, Any]: ...
-    async def list_events(self, *, days: int = ...) -> list[dict[str, Any]]: ...
+    async def list_events(
+        self, *, days: int = ..., back: int = ...
+    ) -> list[dict[str, Any]]: ...
     async def cancel_event(self, event_id: str) -> bool: ...
+    async def list_tasks(
+        self, *, done: bool | None = ..., project_id: str | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    async def create_task(self, **kwargs: Any) -> dict[str, Any]: ...
+    async def update_task(
+        self, task_id: str, **fields: Any
+    ) -> dict[str, Any] | None: ...
+    async def complete_task(
+        self, task_id: str, *, done: bool = ...
+    ) -> dict[str, Any] | None: ...
+    async def archive_task(self, task_id: str) -> bool: ...
+    async def list_projects(self, *, status: str | None = ...) -> list[dict[str, Any]]: ...
+    async def create_project(self, **kwargs: Any) -> dict[str, Any]: ...
+    async def update_project(
+        self, project_id: str, **fields: Any
+    ) -> dict[str, Any] | None: ...
+    async def set_ticket_project(
+        self, ticket_id: str, project_id: str | None
+    ) -> bool: ...
 
 
 def definitions() -> list[dict[str, Any]]:
@@ -123,6 +145,75 @@ def definitions() -> list[dict[str, Any]]:
             "Cancel a calendar event. Reversible.",
             {"event_id": _str("The event's id, from list_events.")},
             required=["event_id"]),
+        _fn("list_tasks",
+            "List things to do. These are separate from messages: a task is "
+            "something written down directly, not something someone called "
+            "about.",
+            {"done": {"type": "boolean",
+                      "description": "true for completed only, false for open "
+                                     "only. Omit for both."},
+             "project_id": _str("Only tasks in this project. Optional.")}),
+        _fn("create_task",
+            "Write down something to do.",
+            {"title": _str("Short imperative, e.g. 'Renew the domain'."),
+             "due_at": _str(LOCAL_TIME_HINT + " Optional."),
+             "priority": _enum("Default med.", ["low", "med", "high"]),
+             "repeat_days": {"type": "integer",
+                             "description": "Repeat every N days. 7 is weekly, "
+                                            "0 or omitted is one-off. Needs a due_at."},
+             "notes": _str("Optional detail."),
+             "project_id": _str("Optional project to file it under."),
+             "item_id": _str("Optional id of the message this came from.")},
+            required=["title"]),
+        _fn("complete_task",
+            "Tick a task off, or un-tick one. A repeating task moves to its "
+            "next date instead of closing.",
+            {"task_id": _str("The task's id, from list_tasks."),
+             "done": {"type": "boolean", "description": "Default true."}},
+            required=["task_id"]),
+        _fn("update_task",
+            "Change a task: reschedule it, reprioritise it, rename it or move "
+            "it to another project. Only send what changes.",
+            {"task_id": _str("The task's id."),
+             "title": _str("Optional."),
+             "due_at": _str(LOCAL_TIME_HINT + " Optional."),
+             "priority": _enum("Optional.", ["low", "med", "high"]),
+             "repeat_days": {"type": "integer", "description": "Optional. 0 stops repeating."},
+             "notes": _str("Optional."),
+             "project_id": _str("Optional.")},
+            required=["task_id"]),
+        _fn("archive_task",
+            "Hide a task. Reversible. Use this when asked to delete one -- it "
+            "is as far as you can go, and you should say so.",
+            {"task_id": _str("The task's id.")},
+            required=["task_id"]),
+        _fn("list_projects",
+            "List projects, with how many tasks and messages each one holds.",
+            {"status": _enum("Filter. Omit for all.", ["active", "paused", "done"])}),
+        _fn("create_project",
+            "Start a project: a named piece of work that outlives one message, "
+            "such as an app someone asked to have built.",
+            {"name": _str("Short name."),
+             "emoji": _str("One emoji for the icon. Optional."),
+             "notes": _str("Optional."),
+             "due_at": _str(LOCAL_TIME_HINT + " Optional deadline.")},
+            required=["name"]),
+        _fn("update_project",
+            "Rename a project, mark it done or paused, or change its notes or "
+            "deadline. Only send what changes.",
+            {"project_id": _str("The project's id, from list_projects."),
+             "name": _str("Optional."),
+             "status": _enum("Optional.", ["active", "paused", "done"]),
+             "emoji": _str("Optional."),
+             "notes": _str("Optional."),
+             "due_at": _str(LOCAL_TIME_HINT + " Optional.")},
+            required=["project_id"]),
+        _fn("file_item",
+            "File a message under a project, so the request and the work sit "
+            "together. Pass no project_id to unfile it.",
+            {"item_id": _str("The item's id, from list_items."),
+             "project_id": _str("The project's id. Omit to unfile.")},
+            required=["item_id"]),
     ]
 
 
@@ -265,6 +356,125 @@ class ToolRunner:
     async def _t_cancel_event(self, a: dict[str, Any]) -> Any:
         ok = await self._store.cancel_event(a["event_id"])
         return {"ok": ok} if ok else {"error": "no such event"}
+
+    # ------------------------------------------------------- tasks
+
+    async def _t_list_tasks(self, a: dict[str, Any]) -> Any:
+        rows = await self._store.list_tasks(
+            done=a.get("done"), project_id=(a.get("project_id") or None), limit=MAX_ITEMS
+        )
+        return [
+            {"id": r["id"], "title": r["title"], "priority": r["priority"],
+             "due_at": _iso(r.get("due_at")), "all_day": r["all_day"],
+             "repeat_days": r["repeat_days"], "notes": r.get("notes"),
+             "done": r.get("done_at") is not None,
+             "project_id": r.get("project_id")}
+            for r in rows
+        ]
+
+    async def _t_create_task(self, a: dict[str, Any]) -> Any:
+        due = _parse_when(a["due_at"], self._tz) if a.get("due_at") else None
+        repeat = int(a.get("repeat_days") or 0)
+        if repeat and due is None:
+            return {"error": "a repeating task needs a due_at"}
+        row = await self._store.create_task(
+            title=str(a["title"])[:200],
+            notes=(a.get("notes") or None),
+            priority=(a.get("priority") or "med"),
+            due_at=due,
+            # A time of exactly midnight means the model gave a day and no
+            # hour. Nudged to 09:00, which is what the summariser already
+            # assumes, rather than pinging at midnight.
+            all_day=bool(due is None or (due.hour == 0 and due.minute == 0)),
+            repeat_days=min(repeat, 365),
+            project_id=(a.get("project_id") or None),
+            ticket_id=(a.get("item_id") or None),
+            source="assistant",
+        )
+        if row["all_day"] and row["due_at"] is not None:
+            fixed = row["due_at"].astimezone(self._tz).replace(hour=9, minute=0)
+            row = await self._store.update_task(row["id"], due_at=fixed) or row
+        return {"ok": True, "id": row["id"], "due_at": _iso(row.get("due_at"))}
+
+    async def _t_complete_task(self, a: dict[str, Any]) -> Any:
+        done = a.get("done")
+        row = await self._store.complete_task(
+            a["task_id"], done=True if done is None else bool(done)
+        )
+        if row is None:
+            return {"error": "no such task"}
+        if row["repeat_days"] and row.get("done_at") is None:
+            return {"ok": True, "repeats": True, "next_due": _iso(row.get("due_at"))}
+        return {"ok": True, "done": row.get("done_at") is not None}
+
+    async def _t_update_task(self, a: dict[str, Any]) -> Any:
+        changes: dict[str, Any] = {}
+        for key in ("title", "priority", "notes", "project_id"):
+            if a.get(key) is not None:
+                changes[key] = a[key]
+        if a.get("due_at"):
+            when = _parse_when(a["due_at"], self._tz)
+            changes["due_at"] = when
+            changes["all_day"] = when.hour == 0 and when.minute == 0
+        if a.get("repeat_days") is not None:
+            changes["repeat_days"] = min(int(a["repeat_days"]), 365)
+        if not changes:
+            return {"error": "nothing to change"}
+        row = await self._store.update_task(a["task_id"], **changes)
+        if row is None:
+            return {"error": "no such task"}
+        return {"ok": True, "id": row["id"], "due_at": _iso(row.get("due_at"))}
+
+    async def _t_archive_task(self, a: dict[str, Any]) -> Any:
+        ok = await self._store.archive_task(a["task_id"])
+        return (
+            {"ok": True, "note": "Archived and hidden. Reversible; nothing was "
+                                 "permanently deleted."}
+            if ok else {"error": "no such task"}
+        )
+
+    # ---------------------------------------------------- projects
+
+    async def _t_list_projects(self, a: dict[str, Any]) -> Any:
+        rows = await self._store.list_projects(status=(a.get("status") or None))
+        return [
+            {"id": r["id"], "name": r["name"], "status": r["status"],
+             "due_at": _iso(r.get("due_at")), "notes": r.get("notes"),
+             "tasks": int(r.get("tasks") or 0),
+             "tasks_done": int(r.get("tasks_done") or 0),
+             "messages": int(r.get("items") or 0)}
+            for r in rows
+        ]
+
+    async def _t_create_project(self, a: dict[str, Any]) -> Any:
+        row = await self._store.create_project(
+            name=str(a["name"])[:120],
+            emoji=(a.get("emoji") or "\U0001f4c1")[:8],
+            notes=(a.get("notes") or None),
+            due_at=_parse_when(a["due_at"], self._tz) if a.get("due_at") else None,
+            source="assistant",
+        )
+        return {"ok": True, "id": row["id"], "name": row["name"]}
+
+    async def _t_update_project(self, a: dict[str, Any]) -> Any:
+        changes: dict[str, Any] = {}
+        for key in ("name", "status", "emoji", "notes"):
+            if a.get(key) is not None:
+                changes[key] = a[key]
+        if a.get("due_at"):
+            changes["due_at"] = _parse_when(a["due_at"], self._tz)
+        if not changes:
+            return {"error": "nothing to change"}
+        row = await self._store.update_project(a["project_id"], **changes)
+        if row is None:
+            return {"error": "no such project"}
+        return {"ok": True, "id": row["id"], "status": row["status"]}
+
+    async def _t_file_item(self, a: dict[str, Any]) -> Any:
+        ok = await self._store.set_ticket_project(
+            a["item_id"], a.get("project_id") or None
+        )
+        return {"ok": ok} if ok else {"error": "no such item"}
 
 
 def _iso(value: Any) -> str | None:

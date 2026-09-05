@@ -64,7 +64,7 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  let payload = { title: "Assistant", body: "", url: "./dashboard.html" };
+  let payload = { title: "Assistant", body: "", url: "./app.html" };
   try {
     if (event.data) payload = { ...payload, ...event.data.json() };
   } catch {
@@ -90,7 +90,7 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const target = (event.notification.data && event.notification.data.url) || "./dashboard.html";
+  const target = (event.notification.data && event.notification.data.url) || "./app.html";
 
   // Focus an existing window if one is open rather than piling up new tabs.
   event.waitUntil(

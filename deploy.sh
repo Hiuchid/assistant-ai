@@ -38,6 +38,12 @@ fi
 echo "==> restarting service"
 "${SSH[@]}" "systemctl restart assistant-ai && sleep 1 && systemctl is-active assistant-ai"
 
+# Startup warms the TTS cache before it binds, which takes a few seconds, so a
+# single immediate curl reports a connection failure on every healthy deploy.
 echo "==> health check"
-"${SSH[@]}" "curl -fsS http://127.0.0.1:8000/health" && echo ""
+"${SSH[@]}" 'for i in $(seq 20); do
+  curl -fs http://127.0.0.1:8000/health && exit 0
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8000/health' && echo ""
 echo "==> done"

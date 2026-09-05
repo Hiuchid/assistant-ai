@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Self
 
 import asyncpg
@@ -454,20 +454,35 @@ class Store:
             raise PersistenceError("event insert returned nothing")
         return dict(row)
 
-    async def list_events(self, *, days: int = 14) -> list[dict[str, Any]]:
-        """Events in a window around now. Negative days looks backwards."""
-        lo, hi = (f"{days} days", "0 days") if days < 0 else ("0 days", f"{days} days")
+    async def list_events(
+        self, *, days: int = 14, back: int = 0
+    ) -> list[dict[str, Any]]:
+        """Events in a window around today.
+
+        `days` looks forward; a negative `days` looks backward instead, which
+        is what the assistant's list_events tool sends when asked what
+        happened. `back` widens the window into the past without shortening
+        the future -- the month grid needs both directions at once, and the
+        old version, which built the interval by string, silently returned an
+        empty range whenever it was asked to look back.
+        """
+        ahead = max(days, 0)
+        behind = max(back, 0) + max(-days, 0)
         rows = await self.pool.fetch(
-            f"""
+            """
             select id::text as id, title, starts_at, ends_at, location, notes,
-                   source, ticket_id::text as ticket_id
+                   source, ticket_id::text as ticket_id,
+                   project_id::text as project_id
               from events
              where not cancelled
-               and starts_at >= date_trunc('day', now()) - interval '{lo}'
-               and starts_at <= now() + interval '{hi}'
+               and starts_at >= date_trunc('day', now())
+                                - make_interval(days => $1::int)
+               and starts_at < date_trunc('day', now())
+                               + make_interval(days => $2::int + 1)
              order by starts_at
-             limit 100
-            """
+             limit 400
+            """,
+            behind, ahead,
         )
         return [dict(r) for r in rows]
 
@@ -495,6 +510,289 @@ class Store:
             """,
             key, value,
         )
+
+    # -------------------------------------------------------------- tasks
+    #
+    # Separate from tickets on purpose (006_planner.sql): a ticket is the
+    # record of a conversation and needs one to exist, a task is something
+    # written down directly. Both can carry a due time, and one sweeper fires
+    # whichever is ready.
+
+    _TASK_COLS = """
+        id::text as id, title, notes, priority, due_at, all_day, repeat_days,
+        done_at, completed_count, source, created_at,
+        project_id::text as project_id, ticket_id::text as ticket_id
+    """
+
+    async def create_task(
+        self, *, title: str, notes: str | None = None, priority: str = "med",
+        due_at: datetime | None = None, all_day: bool = True,
+        repeat_days: int = 0, project_id: str | None = None,
+        ticket_id: str | None = None, source: str = "owner",
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            f"""
+            insert into tasks (title, notes, priority, due_at, all_day,
+                               repeat_days, project_id, ticket_id, source)
+            values ($1, $2, $3, $4, $5, $6, $7::uuid, $8::uuid, $9)
+            returning {self._TASK_COLS}
+            """,
+            title, notes, priority, due_at, all_day, repeat_days,
+            project_id, ticket_id, source,
+        )
+        if row is None:
+            raise PersistenceError("task insert returned nothing")
+        return dict(row)
+
+    async def list_tasks(
+        self, *, done: bool | None = None, project_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Open tasks first, then recently completed ones.
+
+        Completed tasks are not hidden: "what did I finish" is a question worth
+        being able to answer, and the app groups them at the bottom rather than
+        making the owner go looking for them.
+        """
+        rows = await self.pool.fetch(
+            f"""
+            select {self._TASK_COLS}
+              from tasks
+             where archived_at is null
+               and ($1::boolean is null
+                    or ($1 and done_at is not null)
+                    or (not $1 and done_at is null))
+               and ($2::uuid is null or project_id = $2::uuid)
+             order by done_at is not null,
+                      coalesce(due_at, 'infinity'::timestamptz),
+                      case priority when 'high' then 0 when 'med' then 1 else 2 end,
+                      created_at
+             limit $3
+            """,
+            done, project_id, limit,
+        )
+        return [dict(r) for r in rows]
+
+    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            f"select {self._TASK_COLS} from tasks where id = $1::uuid", task_id
+        )
+        return dict(row) if row else None
+
+    # Only these can be changed through the API or by the assistant. A
+    # whitelist rather than "whatever was sent", because the update is built by
+    # string concatenation, and because done_at, notified_at and archived_at
+    # have their own operations with their own rules.
+    TASK_FIELDS = ("title", "notes", "priority", "due_at", "all_day",
+                   "repeat_days", "project_id")
+
+    async def update_task(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
+        changes = {k: v for k, v in fields.items() if k in self.TASK_FIELDS}
+        if not changes:
+            return await self.get_task(task_id)
+        sets, values = [], []
+        for i, (key, value) in enumerate(changes.items(), start=2):
+            cast = "::uuid" if key == "project_id" else ""
+            sets.append(f"{key} = ${i}{cast}")
+            values.append(value)
+        # A moved deadline has not been announced yet, whatever happened to the
+        # old one.
+        if "due_at" in changes:
+            sets.append("notified_at = null")
+        row = await self.pool.fetchrow(
+            f"""
+            update tasks set {", ".join(sets)}
+             where id = $1::uuid and archived_at is null
+             returning {self._TASK_COLS}
+            """,
+            task_id, *values,
+        )
+        return dict(row) if row else None
+
+    async def complete_task(
+        self, task_id: str, *, done: bool = True
+    ) -> dict[str, Any] | None:
+        """Tick or untick a task, rolling repeats forward instead of copying.
+
+        A repeating task that is completed does not become a done row plus a
+        new open one -- it keeps its identity and moves to its next date, with
+        a count of how many times it has come round. One row per task means the
+        list does not fill up with corpses of the same weekly chore.
+        """
+        current = await self.get_task(task_id)
+        if current is None:
+            return None
+
+        repeat = int(current["repeat_days"] or 0)
+        if done and repeat > 0 and current["due_at"] is not None:
+            step = timedelta(days=repeat)
+            nxt = current["due_at"] + step
+            now = datetime.now(UTC)
+            # Catch up, rather than firing a burst of overdue occurrences at a
+            # task that has been ignored for a month.
+            while nxt <= now:
+                nxt += step
+            row = await self.pool.fetchrow(
+                f"""
+                update tasks
+                   set due_at = $2, notified_at = null, done_at = null,
+                       completed_count = completed_count + 1
+                 where id = $1::uuid returning {self._TASK_COLS}
+                """,
+                task_id, nxt,
+            )
+        else:
+            row = await self.pool.fetchrow(
+                f"""
+                update tasks
+                   set done_at = case when $2 then now() else null end,
+                       completed_count = completed_count + case when $2 then 1 else 0 end
+                 where id = $1::uuid returning {self._TASK_COLS}
+                """,
+                task_id, done,
+            )
+        return dict(row) if row else None
+
+    async def archive_task(self, task_id: str) -> bool:
+        row = await self.pool.fetchrow(
+            "update tasks set archived_at = now() where id = $1::uuid returning id",
+            task_id,
+        )
+        return row is not None
+
+    async def due_tasks(self) -> list[dict[str, Any]]:
+        """Tasks whose time has come. Mirrors due_reminders for tickets."""
+        rows = await self.pool.fetch(
+            """
+            select t.id::text as id, t.title, t.notes, t.due_at, t.priority,
+                   p.name as project
+              from tasks t
+              left join projects p on p.id = t.project_id
+             where t.due_at is not null
+               and t.archived_at is null
+               and t.notified_at is null
+               and t.done_at is null
+               and t.due_at <= now()
+             order by t.due_at
+             limit 20
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def mark_task_notified(self, task_id: str) -> None:
+        await self.pool.execute(
+            "update tasks set notified_at = now() where id = $1::uuid", task_id
+        )
+
+    # ----------------------------------------------------------- projects
+
+    # Qualified, because list_projects joins tickets -- which has its own
+    # status, notes, due_at and created_at. Every statement below aliases the
+    # table `p` so one list serves all of them.
+    _PROJECT_COLS = """
+        p.id::text as id, p.name, p.emoji, p.colour, p.status, p.notes,
+        p.due_at, p.source, p.created_at
+    """
+
+    async def create_project(
+        self, *, name: str, emoji: str = "\U0001f4c1", colour: str = "violet",
+        notes: str | None = None, due_at: datetime | None = None,
+        source: str = "owner",
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            f"""
+            insert into projects as p (name, emoji, colour, notes, due_at, source)
+            values ($1, $2, $3, $4, $5, $6)
+            returning {self._PROJECT_COLS}
+            """,
+            name, emoji, colour, notes, due_at, source,
+        )
+        if row is None:
+            raise PersistenceError("project insert returned nothing")
+        return dict(row)
+
+    async def list_projects(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        """Projects with their task and message counts.
+
+        Counted here rather than in the app: a project row means little without
+        "3 of 7 done", and working that out in the browser would mean fetching
+        every task of every project just to render a list.
+        """
+        rows = await self.pool.fetch(
+            f"""
+            select {self._PROJECT_COLS},
+                   count(t.id) filter (where t.archived_at is null) as tasks,
+                   count(t.id) filter (where t.archived_at is null
+                                         and t.done_at is not null) as tasks_done,
+                   count(distinct k.id) filter (where k.archived_at is null) as items
+              from projects p
+              left join tasks t on t.project_id = p.id
+              left join tickets k on k.project_id = p.id
+             where p.archived_at is null
+               and ($1::text is null or p.status = $1)
+             group by p.id
+             order by p.status <> 'active',
+                      coalesce(p.due_at, 'infinity'::timestamptz),
+                      p.created_at desc
+            """,
+            status,
+        )
+        return [dict(r) for r in rows]
+
+    PROJECT_FIELDS = ("name", "emoji", "colour", "status", "notes", "due_at")
+
+    async def update_project(
+        self, project_id: str, **fields: Any
+    ) -> dict[str, Any] | None:
+        changes = {k: v for k, v in fields.items() if k in self.PROJECT_FIELDS}
+        if not changes:
+            row = await self.pool.fetchrow(
+                f"select {self._PROJECT_COLS} from projects p where p.id = $1::uuid",
+                project_id,
+            )
+            return dict(row) if row else None
+        sets = [f"{key} = ${i}" for i, key in enumerate(changes, start=2)]
+        row = await self.pool.fetchrow(
+            f"""
+            update projects as p set {", ".join(sets)}
+             where p.id = $1::uuid and p.archived_at is null
+             returning {self._PROJECT_COLS}
+            """,
+            project_id, *changes.values(),
+        )
+        return dict(row) if row else None
+
+    async def archive_project(self, project_id: str) -> bool:
+        """Hide a project. Its tasks and messages survive, unfiled.
+
+        Done explicitly rather than leaning on `on delete set null`, which only
+        fires on a real delete -- and a real delete is not offered, because
+        losing a project must never take the record of a conversation with it.
+        """
+        row = await self.pool.fetchrow(
+            "update projects set archived_at = now() where id = $1::uuid returning id",
+            project_id,
+        )
+        if row is None:
+            return False
+        await self.pool.execute(
+            "update tasks set project_id = null where project_id = $1::uuid", project_id
+        )
+        await self.pool.execute(
+            "update tickets set project_id = null where project_id = $1::uuid",
+            project_id,
+        )
+        return True
+
+    async def set_ticket_project(self, ticket_id: str, project_id: str | None) -> bool:
+        row = await self.pool.fetchrow(
+            """
+            update tickets set project_id = $2::uuid
+             where id = $1::uuid returning id
+            """,
+            ticket_id, project_id,
+        )
+        return row is not None
 
     # ---------------------------------------------------------- retention
 

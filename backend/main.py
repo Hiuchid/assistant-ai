@@ -34,7 +34,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from . import auth, resume
 from .config import (
@@ -211,62 +211,88 @@ async def _evict_idle_sessions() -> None:
 
 
 async def _fire_due_reminders() -> None:
-    """Announce items whose time has come.
+    """Announce items and tasks whose time has come.
 
     A reminder that only appears in a dashboard you have to remember to open is
     not much of a reminder, so this pushes.
 
+    Two sources, one pass: a ticket with a due time, and a task. They are
+    different rows (006_planner.sql) but the same thing to whoever's phone
+    buzzes, so they are collected together and delivered identically.
+
     Only what actually went out is marked notified. A failed push leaves the
-    item unfired so the next sweep retries it -- marking it either way would
-    turn a transient network error into a silently missed reminder.
+    reminder unfired so the next sweep retries it -- marking it either way
+    would turn a transient network error into a silently missed reminder.
     """
     store: Store | None = app.state.store
     if store is None:
         return
-    notifier: Notifier = app.state.notifier
-    sender: PushSender = app.state.push
     try:
-        due = await store.due_reminders()
+        tickets = await store.due_reminders()
+        tasks = await store.due_tasks()
     except Exception as e:
         log.error("reminder query failed", extra={"error": repr(e)})
         return
-    if not due:
+    if not tickets and not tasks:
         return
 
+    sender: PushSender = app.state.push
     subs = (
         rows_to_subscriptions(await store.active_subscriptions())
         if sender.configured
         else []
     )
 
-    for item in due:
+    for item in tickets:
         who = "" if item["mode"] == "owner" else " (from a message)"
-        title = f"{item['title']}{who}"
-        delivered = False
-
-        if subs:
-            result = await sender.send(
-                subs, title=title, body=item["summary"],
-                url="/assistant-ai/dashboard.html", tag=item["id"],
-            )
-            await store.mark_subscriptions_expired(result.expired)
-            delivered = result.delivered > 0
-        if not delivered and notifier.configured:
-            # Falls back only when push delivered to nobody, so a working
-            # install does not also get a duplicate through the webhook.
-            delivered = await notifier.send(title=title, body=item["summary"])
-
-        if delivered:
+        if await _deliver_reminder(
+            subs, title=f"{item['title']}{who}", body=item["summary"], tag=item["id"]
+        ):
             await store.mark_notified(item["id"])
             log.info("reminder fired", extra={"ticket_id": item["id"]})
-        elif not sender.configured and not notifier.configured:
-            # Nothing will ever deliver these, so do not re-log the same items
-            # every minute for the life of the process.
-            await store.mark_notified(item["id"])
-            log.warning(
-                "reminder due but undeliverable; marked to stop repeating",
-                extra={"ticket_id": item["id"], "title": item["title"]},
-            )
+
+    for task in tasks:
+        where = f"{task['project']} · " if task.get("project") else ""
+        body = task.get("notes") or f"{where}Due now."
+        if await _deliver_reminder(
+            subs, title=task["title"], body=body, tag=task["id"]
+        ):
+            await store.mark_task_notified(task["id"])
+            log.info("task reminder fired", extra={"task_id": task["id"]})
+
+
+async def _deliver_reminder(
+    subs: list[object], *, title: str, body: str, tag: str
+) -> bool:
+    """Push, then fall back to the webhook. True means it reached somebody.
+
+    False leaves the reminder unfired for the next sweep -- except when nothing
+    is configured at all, where it returns True so the same undeliverable rows
+    are not re-attempted every minute for the life of the process.
+    """
+    sender: PushSender = app.state.push
+    notifier: Notifier = app.state.notifier
+    delivered = False
+
+    if subs:
+        result = await sender.send(
+            subs, title=title, body=body,
+            url="/assistant-ai/app.html", tag=tag,
+        )
+        await app.state.store.mark_subscriptions_expired(result.expired)
+        delivered = result.delivered > 0
+    if not delivered and notifier.configured:
+        # Falls back only when push reached nobody, so a working install does
+        # not also get a duplicate through the webhook.
+        delivered = await notifier.send(title=title, body=body)
+
+    if not delivered and not sender.configured and not notifier.configured:
+        log.warning(
+            "reminder due but undeliverable; marked to stop repeating",
+            extra={"title": title},
+        )
+        return True
+    return delivered
 
 
 async def _sweep_stale_conversations() -> None:
@@ -493,7 +519,7 @@ async def push_test(
         subs,
         title="Test notification",
         body="If you can see this, reminders will reach you.",
-        url="/assistant-ai/dashboard.html",
+        url="/assistant-ai/app.html",
     )
     await store.mark_subscriptions_expired(result.expired)
     return {
@@ -572,10 +598,15 @@ class EventIn(BaseModel):
 @app.get("/api/events")
 async def list_events(
     days: int = 14,
+    back: int = 0,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, object]:
     _require_session(authorization)
-    return {"events": await _require_store().list_events(days=max(-365, min(days, 365)))}
+    return {
+        "events": await _require_store().list_events(
+            days=max(-365, min(days, 365)), back=max(0, min(back, 365))
+        )
+    }
 
 
 @app.post("/api/events")
@@ -640,6 +671,192 @@ async def archive_item(
     if not await _require_store().archive_ticket(ticket_id):
         raise HTTPException(status_code=404, detail="no such item")
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ tasks
+#
+# A task is a thing to do that never had a conversation behind it. Tickets
+# cover the ones that did; see 006_planner.sql for why they stayed apart.
+
+
+class TaskIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+    priority: Literal["low", "med", "high"] = "med"
+    due_at: datetime | None = None
+    all_day: bool = True
+    repeat_days: int = Field(default=0, ge=0, le=365)
+    project_id: str | None = None
+    ticket_id: str | None = None
+
+
+class TaskPatch(BaseModel):
+    """Every field optional, and `exclude_unset` tells apart "leave it" from
+    "clear it" -- without that, editing a title would silently wipe the due
+    date, because both arrive as null."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+    priority: Literal["low", "med", "high"] | None = None
+    due_at: datetime | None = None
+    all_day: bool | None = None
+    repeat_days: int | None = Field(default=None, ge=0, le=365)
+    project_id: str | None = None
+
+
+class DoneIn(BaseModel):
+    done: bool = True
+
+
+@app.get("/api/tasks")
+async def list_tasks(
+    done: bool | None = None,
+    project_id: str | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    return {
+        "tasks": await _require_store().list_tasks(
+            done=done, project_id=project_id or None
+        )
+    }
+
+
+@app.post("/api/tasks")
+async def create_task(
+    body: TaskIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    return await _require_store().create_task(
+        title=body.title.strip(), notes=body.notes, priority=body.priority,
+        due_at=body.due_at, all_day=body.all_day, repeat_days=body.repeat_days,
+        project_id=body.project_id or None, ticket_id=body.ticket_id or None,
+        source="owner",
+    )
+
+
+@app.patch("/api/tasks/{task_id}")
+async def update_task(
+    task_id: str,
+    body: TaskPatch,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    row = await _require_store().update_task(task_id, **body.model_dump(exclude_unset=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such task")
+    return row
+
+
+@app.post("/api/tasks/{task_id}/done")
+async def complete_task(
+    task_id: str,
+    body: DoneIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    row = await _require_store().complete_task(task_id, done=body.done)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such task")
+    return row
+
+
+@app.post("/api/tasks/{task_id}/archive")
+async def archive_task(
+    task_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if not await _require_store().archive_task(task_id):
+        raise HTTPException(status_code=404, detail="no such task")
+    return {"ok": True}
+
+
+# --------------------------------------------------------------- projects
+
+
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    emoji: str = Field(default="\U0001f4c1", max_length=8)
+    colour: Literal["violet", "blue", "green", "amber", "red", "grey"] = "violet"
+    notes: str | None = Field(default=None, max_length=4000)
+    due_at: datetime | None = None
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    emoji: str | None = Field(default=None, max_length=8)
+    colour: Literal["violet", "blue", "green", "amber", "red", "grey"] | None = None
+    status: Literal["active", "paused", "done"] | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+    due_at: datetime | None = None
+
+
+class ProjectRef(BaseModel):
+    project_id: str | None = None
+
+
+@app.get("/api/projects")
+async def list_projects(
+    status: str | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if status not in (None, "", "active", "paused", "done"):
+        raise HTTPException(status_code=400, detail="bad status")
+    return {"projects": await _require_store().list_projects(status=status or None)}
+
+
+@app.post("/api/projects")
+async def create_project(
+    body: ProjectIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    return await _require_store().create_project(
+        name=body.name.strip(), emoji=body.emoji, colour=body.colour,
+        notes=body.notes, due_at=body.due_at, source="owner",
+    )
+
+
+@app.patch("/api/projects/{project_id}")
+async def update_project(
+    project_id: str,
+    body: ProjectPatch,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    row = await _require_store().update_project(
+        project_id, **body.model_dump(exclude_unset=True)
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such project")
+    return row
+
+
+@app.post("/api/projects/{project_id}/archive")
+async def archive_project(
+    project_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if not await _require_store().archive_project(project_id):
+        raise HTTPException(status_code=404, detail="no such project")
+    return {"ok": True}
+
+
+@app.put("/api/items/{ticket_id}/project")
+async def file_item(
+    ticket_id: str,
+    body: ProjectRef,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """File a message under a project, or unfile it with a null id."""
+    _require_session(authorization)
+    if not await _require_store().set_ticket_project(ticket_id, body.project_id or None):
+        raise HTTPException(status_code=404, detail="no such item")
+    return {"ok": True, "project_id": body.project_id or None}
 
 
 @app.websocket("/ws/chat")
