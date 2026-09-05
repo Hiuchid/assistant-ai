@@ -32,11 +32,19 @@ const VIEWS = {
 
 // ---------------------------------------------------------------- helpers
 
+// localStorage, not sessionStorage: an installed app is closed and reopened
+// constantly, and sessionStorage dies with the tab. The trade is that the
+// token now persists on the device -- which is the right one here, because it
+// grants reading and status changes on one person's own assistant, not
+// password changes and not deletion. Sign out clears it.
 function store(key, value) {
-  try { sessionStorage.setItem(key, value); } catch { /* private mode */ }
+  try { localStorage.setItem(key, value); } catch { /* private mode */ }
 }
 function read(key) {
-  try { return sessionStorage.getItem(key) || ""; } catch { return ""; }
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+function forget(key) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
 }
 
 async function api(path, options = {}) {
@@ -323,14 +331,10 @@ function badge(id, n) {
 // ------------------------------------------------------------------ auth
 
 function signOut() {
-  try {
-    sessionStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(EMAIL_KEY);
-  } catch { /* ignore */ }
+  forget(SESSION_KEY);
+  forget(EMAIL_KEY);
   clearInterval(poll);
   token = "";
-  $("shell").hidden = true;
-  $("loginView").hidden = false;
   // Reload rather than tearing down: the widget holds a socket, a mic stream
   // and timers, and unwinding all of that by hand is more error-prone than
   // starting clean.
@@ -339,8 +343,7 @@ function signOut() {
 
 function launch(t) {
   token = t;
-  $("loginView").hidden = true;
-  $("shell").hidden = false;
+  if ($("loginDialog").open) $("loginDialog").close();
   show("today");
   refresh();
   poll = setInterval(refresh, POLL_MS);
@@ -400,7 +403,14 @@ $("refreshBtn").addEventListener("click", refresh);
 $("signOutBtn").addEventListener("click", signOut);
 $("settingsSignOut").addEventListener("click", signOut);
 
+// The dialog cannot be dismissed: there is nothing to look at behind it
+// without a session, so Escape or a backdrop click just reopens it.
+$("loginDialog").addEventListener("cancel", (e) => {
+  e.preventDefault();
+});
+
 registerServiceWorker();
 
 const existing = read(SESSION_KEY);
 if (existing) launch(existing);
+else $("loginDialog").showModal();

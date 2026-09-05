@@ -36,9 +36,10 @@ _SALT_BYTES = 16
 
 Role = Literal["operator", "owner"]
 
-# Long enough not to nag, short enough that a stolen token expires. The
-# dashboard and owner mode both re-issue on use.
-SESSION_TTL_S = 7 * 24 * 3600
+# An installed app that asks for a password every week is an app people stop
+# opening. 30 days, against a token that lives on one device and grants read
+# access plus status changes -- not password changes, and not deletion.
+SESSION_TTL_S = 30 * 24 * 3600
 
 
 def hash_password(password: str) -> str:
