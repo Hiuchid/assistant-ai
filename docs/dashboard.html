@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Inbox</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#131314">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Assistant">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -34,6 +40,8 @@
       <button class="chip" data-filter="mode" data-value="owner" aria-pressed="false">Mine</button>
     </div>
     <span class="spacer"></span>
+    <button class="chip" id="pushBtn" hidden>Enable notifications</button>
+    <button class="chip" id="pushTest" hidden>Test</button>
     <span class="state" id="status">loading…</span>
   </div>
   <div class="items" id="items"></div>
@@ -48,6 +56,9 @@ const SESSION_KEY = "assistant.session";
 // rows -- and at a handful of items a day, polling is entirely adequate and
 // keeps the frontend free of keys entirely.
 const POLL_MS = 8000;
+
+import { registerServiceWorker, enablePush, sendTestPush, pushStatus }
+  from "./js/pwa.js";
 
 const $ = (id) => document.getElementById(id);
 let token = "";
@@ -186,7 +197,32 @@ function launch(t) {
   $("app").hidden = false;
   refresh();
   timer = setInterval(refresh, POLL_MS);
+  paintPush();
 }
+
+async function paintPush() {
+  const state = await pushStatus();
+  const btn = $("pushBtn"), test = $("pushTest");
+  btn.hidden = false;
+  test.hidden = state !== "on";
+  if (state === "on") { btn.textContent = "Notifications on"; btn.setAttribute("aria-pressed", "true"); }
+  else if (state === "blocked") { btn.textContent = "Notifications blocked"; btn.disabled = true; }
+  else if (state === "unsupported") { btn.textContent = "Add to Home Screen for alerts"; }
+  else { btn.textContent = "Enable notifications"; }
+}
+
+$("pushBtn").addEventListener("click", async () => {
+  $("pushBtn").disabled = true;
+  const { ok, reason } = await enablePush(token);
+  $("status").textContent = ok ? "Notifications enabled." : reason;
+  $("pushBtn").disabled = false;
+  paintPush();
+});
+
+$("pushTest").addEventListener("click", async () => {
+  const { ok, reason } = await sendTestPush(token);
+  $("status").textContent = ok ? reason : `Test failed: ${reason}`;
+});
 
 $("filters").addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
@@ -225,6 +261,8 @@ $("loginForm").addEventListener("submit", async (e) => {
     $("loginBtn").disabled = false;
   }
 });
+
+registerServiceWorker();
 
 let existing = "";
 try { existing = sessionStorage.getItem(SESSION_KEY) || ""; } catch { /* ignore */ }

@@ -13,3 +13,10 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
+
+# pywebpush ships no type information and has no stubs package. This declares
+# that fact about a dependency; it is not a line-level ignore hiding a real
+# error, and it is scoped to the one module so nothing else loses checking.
+[[tool.mypy.overrides]]
+module = "pywebpush.*"
+ignore_missing_imports = true

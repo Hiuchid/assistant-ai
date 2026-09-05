@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leave a message</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#131314">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Assistant">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body class="centred">
@@ -53,6 +59,10 @@ startWidget({
     mute: document.getElementById("mute"),
   },
 });
+</script>
+<script type="module">
+import { registerServiceWorker } from "./js/pwa.js";
+registerServiceWorker();
 </script>
 </body>
 </html>

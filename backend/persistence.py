@@ -309,6 +309,54 @@ class Store:
             for r in rows
         ]
 
+    # ------------------------------------------------------- push subs
+
+    async def save_subscription(
+        self, *, user_id: str, endpoint: str, p256dh: str, auth: str,
+        user_agent: str | None,
+    ) -> None:
+        """Upsert on endpoint: re-subscribing an install must not duplicate it.
+
+        Duplicates would all fire at once, so the same reminder would arrive
+        three times on one phone.
+        """
+        await self.pool.execute(
+            """
+            insert into push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+            values ($1::uuid, $2, $3, $4, $5)
+            on conflict (endpoint) do update
+                set user_id = excluded.user_id,
+                    p256dh  = excluded.p256dh,
+                    auth    = excluded.auth,
+                    expired = false
+            """,
+            user_id, endpoint, p256dh, auth, user_agent,
+        )
+
+    async def active_subscriptions(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            select id::text as id, endpoint, p256dh, auth
+              from push_subscriptions
+             where not expired
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def mark_subscriptions_expired(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        await self.pool.execute(
+            "update push_subscriptions set expired = true where id = any($1::uuid[])",
+            ids,
+        )
+
+    async def delete_subscription(self, endpoint: str) -> bool:
+        row = await self.pool.fetchrow(
+            "delete from push_subscriptions where endpoint = $1 returning id", endpoint
+        )
+        return row is not None
+
     # ----------------------------------------------------------- reminders
 
     async def due_reminders(self) -> list[dict[str, Any]]:

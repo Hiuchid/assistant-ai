@@ -57,6 +57,7 @@ from .providers.tts.edge import EdgeTTS
 from .providers.tts.engine import TTSEngine
 from .providers.tts.fish import FishAudioTTS
 from .providers.tts.piper import PiperTTS
+from .push import PushSender, rows_to_subscriptions
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
 from .sentences import SentenceSplitter
 from .session import Conversation, SessionStore, Turn
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ladder = GroqLadder(settings)
     app.state.stt = GroqWhisper(settings)
     app.state.notifier = Notifier(settings.notify_url)
+    app.state.push = PushSender(settings.vapid_private_key, settings.vapid_subject)
 
     # §3.3: the database is the source of truth. Without a DSN the assistant
     # still runs, but nothing is recorded and no item can be generated -- so it
@@ -212,18 +214,42 @@ async def _fire_due_reminders() -> None:
     if store is None:
         return
     notifier: Notifier = app.state.notifier
+    sender: PushSender = app.state.push
     try:
         due = await store.due_reminders()
     except Exception as e:
         log.error("reminder query failed", extra={"error": repr(e)})
         return
+    if not due:
+        return
+
+    subs = (
+        rows_to_subscriptions(await store.active_subscriptions())
+        if sender.configured
+        else []
+    )
 
     for item in due:
         who = "" if item["mode"] == "owner" else " (from a message)"
-        if await notifier.send(title=f"{item['title']}{who}", body=item["summary"]):
+        title = f"{item['title']}{who}"
+        delivered = False
+
+        if subs:
+            result = await sender.send(
+                subs, title=title, body=item["summary"],
+                url="/assistant-ai/dashboard.html", tag=item["id"],
+            )
+            await store.mark_subscriptions_expired(result.expired)
+            delivered = result.delivered > 0
+        if not delivered and notifier.configured:
+            # Falls back only when push delivered to nobody, so a working
+            # install does not also get a duplicate through the webhook.
+            delivered = await notifier.send(title=title, body=item["summary"])
+
+        if delivered:
             await store.mark_notified(item["id"])
             log.info("reminder fired", extra={"ticket_id": item["id"]})
-        elif not notifier.configured:
+        elif not sender.configured and not notifier.configured:
             # Nothing will ever deliver these, so do not re-log the same items
             # every minute for the life of the process.
             await store.mark_notified(item["id"])
@@ -390,6 +416,79 @@ def _require_store() -> Store:
     if store is None:
         raise HTTPException(status_code=503, detail="database unavailable")
     return store
+
+
+class PushSubscription(BaseModel):
+    endpoint: str
+    p256dh: str
+    auth: str
+
+
+@app.get("/api/push/key")
+async def push_key() -> dict[str, object]:
+    """The VAPID public key, so the browser can subscribe.
+
+    Unauthenticated on purpose: it is a public key, the client needs it before
+    it has anything else, and withholding it protects nothing.
+    """
+    return {
+        "key": settings.vapid_public_key,
+        "enabled": bool(settings.vapid_private_key and settings.vapid_public_key),
+    }
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(
+    body: PushSubscription,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    session = _require_session(authorization)
+    await _require_store().save_subscription(
+        user_id=session.user_id,
+        endpoint=body.endpoint,
+        p256dh=body.p256dh,
+        auth=body.auth,
+        user_agent=request.headers.get("user-agent", "")[:300],
+    )
+    log.info("push subscription saved", extra={"user_id": session.user_id})
+    return {"ok": True}
+
+
+@app.post("/api/push/unsubscribe")
+async def push_unsubscribe(
+    body: PushSubscription,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    return {"ok": await _require_store().delete_subscription(body.endpoint)}
+
+
+@app.post("/api/push/test")
+async def push_test(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Send a notification now, so the user can confirm it arrives.
+
+    Without this, the first time anyone learns push is broken is when a
+    reminder silently fails to appear.
+    """
+    _require_session(authorization)
+    store = _require_store()
+    sender: PushSender = app.state.push
+    subs = rows_to_subscriptions(await store.active_subscriptions())
+    result = await sender.send(
+        subs,
+        title="Test notification",
+        body="If you can see this, reminders will reach you.",
+        url="/assistant-ai/dashboard.html",
+    )
+    await store.mark_subscriptions_expired(result.expired)
+    return {
+        "delivered": result.delivered,
+        "subscriptions": len(subs),
+        "expired": len(result.expired),
+    }
 
 
 @app.get("/api/items")

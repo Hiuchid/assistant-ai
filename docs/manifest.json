@@ -1,0 +1,47 @@
+{
+  "name": "Assistant",
+  "short_name": "Assistant",
+  "description": "Voice and text assistant. Takes messages, keeps reminders.",
+  "id": "/assistant-ai/",
+  "start_url": "/assistant-ai/",
+  "scope": "/assistant-ai/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#131314",
+  "theme_color": "#131314",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Talk to the assistant",
+      "short_name": "Assistant",
+      "url": "assistant.html",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Inbox",
+      "short_name": "Inbox",
+      "url": "dashboard.html",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

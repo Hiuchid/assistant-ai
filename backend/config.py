@@ -216,13 +216,20 @@ class Settings(BaseSettings):
     inactivity_minutes: int = 5
     sweep_interval_s: int = 60
 
+    # ---- Web Push ----
+    # Self-generated VAPID pair; no account and no third party. The public key
+    # is served to the browser and is meant to be public. Absent, reminders
+    # still appear in the dashboard but nothing reaches a phone.
+    vapid_private_key: str | None = None
+    vapid_public_key: str | None = None
+    # RFC 8292 requires a contact so a push service can report abuse.
+    vapid_subject: str = "mailto:admin@assistant.local"
+
     # ---- Reminders ----
-    # Any endpoint that accepts a POST body; ntfy.sh is the intended default
-    # because it needs no account and no key. Unset means reminders still
-    # appear in the dashboard but nothing pushes to a phone.
-    #
-    # The topic in that URL is the ONLY secret -- anyone who knows it can read
-    # your reminders and send you fake ones. Use a long random topic.
+    # Legacy fallback, used only when Web Push is unconfigured. Any endpoint
+    # accepting a POST body; ntfy was the original default. Superseded because
+    # an ntfy topic is a shared secret in all but name -- anyone who learns it
+    # can read the reminders and forge new ones.
     notify_url: str | None = None
 
     # Used to resolve "Friday" and "tomorrow" into an actual timestamp. The
