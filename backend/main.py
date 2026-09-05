@@ -22,6 +22,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Annotated, Final, Literal
 
 from fastapi import (
@@ -42,13 +43,13 @@ from .logging_setup import conversation_id_var, setup_logging
 from .notify import Notifier
 from .persistence import Store
 from .prompts.owner import OWNER_SYSTEM_PROMPT
-from .prompts.visitor import VISITOR_SYSTEM_PROMPT
+from .prompts.visitor import VISITOR_SYSTEM_PROMPT, visitor_prompt
 from .providers.llm import (
     Completed,
-    GroqLadder,
     LadderExhausted,
     StreamInterrupted,
     Token,
+    ToolLadder,
 )
 from .providers.stt import GroqWhisper, STTUnavailable, Transcript
 from .providers.tts.base import Audio, TTSBackend, TTSUnavailable, VoiceProfile
@@ -62,6 +63,7 @@ from .ratelimit import ConnectionLimiter, MessageRateLimiter
 from .sentences import SentenceSplitter
 from .session import Conversation, SessionStore, Turn
 from .summarize import Summarizer, draft_from_degraded
+from .tools import ToolRunner, definitions
 
 VERSION: Final = "0.2.0"
 
@@ -93,7 +95,7 @@ _DUMMY_HASH = auth.hash_password("this is not anybody's password")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.ladder = GroqLadder(settings)
+    app.state.ladder = ToolLadder(settings)
     app.state.stt = GroqWhisper(settings)
     app.state.notifier = Notifier(settings.notify_url)
     app.state.push = PushSender(settings.vapid_private_key, settings.vapid_subject)
@@ -506,6 +508,11 @@ async def list_items(
     reason for a key to exist in the frontend.
     """
     _require_session(authorization)
+    # An empty query value means "no filter". A browser sending ?status= is
+    # asking for everything, not asking for a status called "" -- rejecting
+    # that produced a 400 the client swallowed, leaving the inbox blank.
+    mode = mode or None
+    status = status or None
     if mode not in (None, "owner", "visitor"):
         raise HTTPException(status_code=400, detail="bad mode")
     if status not in (None, "new", "triaged", "agent_queued", "done"):
@@ -544,6 +551,87 @@ async def update_item(
     return {"ok": True, "status": body.status}
 
 
+class EventIn(BaseModel):
+    title: str
+    starts_at: datetime
+    ends_at: datetime | None = None
+    location: str | None = None
+    notes: str | None = None
+
+
+@app.get("/api/events")
+async def list_events(
+    days: int = 14,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    return {"events": await _require_store().list_events(days=max(-365, min(days, 365)))}
+
+
+@app.post("/api/events")
+async def create_event(
+    body: EventIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if body.ends_at and body.ends_at <= body.starts_at:
+        raise HTTPException(status_code=400, detail="ends_at must be after starts_at")
+    return await _require_store().create_event(
+        title=body.title[:200], starts_at=body.starts_at,
+        ends_at=body.ends_at or body.starts_at + timedelta(hours=1),
+        location=body.location, notes=body.notes, ticket_id=None, source="owner",
+    )
+
+
+@app.delete("/api/events/{event_id}")
+async def cancel_event(
+    event_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if not await _require_store().cancel_event(event_id):
+        raise HTTPException(status_code=404, detail="no such event")
+    return {"ok": True}
+
+
+class BriefingIn(BaseModel):
+    briefing: str
+
+
+@app.get("/api/briefing")
+async def get_briefing(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """The standing instructions given to the visitor-facing assistant."""
+    _require_session(authorization)
+    return {"briefing": await _require_store().get_setting("visitor_briefing")}
+
+
+@app.put("/api/briefing")
+async def set_briefing(
+    body: BriefingIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Owner-authored, so trusted -- but capped so it cannot crowd out the
+    rules it is appended to."""
+    _require_session(authorization)
+    text = body.briefing.strip()[:1200]
+    await _require_store().set_setting("visitor_briefing", text)
+    log.info("briefing updated", extra={"chars": len(text)})
+    return {"ok": True, "briefing": text}
+
+
+@app.post("/api/items/{ticket_id}/archive")
+async def archive_item(
+    ticket_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if not await _require_store().archive_ticket(ticket_id):
+        raise HTTPException(status_code=404, detail="no such item")
+    return {"ok": True}
+
+
 @app.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     # ---- Origin check, BEFORE accept ----
@@ -562,7 +650,7 @@ async def ws_chat(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
-    conversation = sessions.create(VISITOR_SYSTEM_PROMPT)
+    conversation = sessions.create(await _visitor_system_prompt())
     conversation_id_var.set(conversation.id)
     log.info("ws connected", extra={"client_ip": ip})
 
@@ -910,6 +998,23 @@ async def _say(
     )
 
 
+async def _visitor_system_prompt() -> str:
+    """The secretary prompt plus whatever standing instructions are set.
+
+    Read per connection rather than cached: the owner edits this to say things
+    like "I am away until the 15th", and a cache would keep telling callers the
+    old thing until the process restarted.
+    """
+    store: Store | None = app.state.store
+    if store is None:
+        return VISITOR_SYSTEM_PROMPT
+    try:
+        return visitor_prompt(await store.get_setting("visitor_briefing"))
+    except Exception as e:
+        log.error("could not load briefing", extra={"error": repr(e)})
+        return VISITOR_SYSTEM_PROMPT
+
+
 def _voice_for(conversation: Conversation) -> VoiceProfile:
     """§1: owner and visitor hear different voices.
 
@@ -936,8 +1041,12 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
                    model="degraded-capture")
         return
 
+    if conversation.mode == "owner":
+        await _owner_turn(websocket, conversation)
+        return
+
     reply: list[str] = []
-    ladder: GroqLadder = websocket.app.state.ladder
+    ladder: ToolLadder = websocket.app.state.ladder
     splitter = SentenceSplitter()
 
     # §7.1 + §7.14: synthesis runs concurrently with generation so the first
@@ -1016,6 +1125,63 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
             audio_queue.put_nowait(None)
         with contextlib.suppress(asyncio.CancelledError):
             await sender
+
+
+async def _owner_turn(websocket: WebSocket, conversation: Conversation) -> None:
+    """The owner's turn, with tools.
+
+    Not streamed: a tool loop must see a whole response before it knows whether
+    to run a tool or reply, so streaming would add complexity and buy nothing.
+    Owner replies are a sentence or two and arrive in a few hundred ms.
+    """
+    ladder: ToolLadder = websocket.app.state.ladder
+    store: Store | None = websocket.app.state.store
+    if store is None:
+        await _say(websocket, conversation,
+                   ["I can't reach my records at the moment."], model="no-store")
+        return
+
+    runner = ToolRunner(store, tz=settings.timezone)
+    try:
+        turn = await ladder.complete_with_tools(
+            list(conversation.messages()), definitions(), runner
+        )
+    except LadderExhausted as e:
+        log.warning("owner turn had no model", extra={"error": str(e)[:200]})
+        conversation.degraded = DegradedCapture()
+        await _say(websocket, conversation, conversation.degraded.open(),
+                   model="degraded-capture")
+        return
+
+    text = turn.text or "Done."
+    conversation.add("agent", text)
+    await _persist_turn(websocket, conversation, role="agent", text=text,
+                        latency_ms=round(turn.total_ms))
+    log.info("owner turn", extra={"model": turn.model, "hops": turn.hops,
+                                  "tools": turn.tools_used,
+                                  "total_ms": round(turn.total_ms)})
+
+    await websocket.send_json({"type": "token", "text": text})
+    # Tell the client which tools ran, so the app can refresh the module the
+    # assistant just changed rather than waiting for the next poll.
+    if turn.tools_used:
+        await websocket.send_json({"type": "tools", "used": turn.tools_used})
+
+    profile = _voice_for(conversation)
+    for sentence in SentenceSplitter().feed(text + " ") or [text]:
+        try:
+            audio = await websocket.app.state.tts.synthesize(sentence, profile)
+        except TTSUnavailable:
+            break
+        await websocket.send_json({
+            "type": "audio", "seq": 1, "mime": audio.mime,
+            "data": base64.b64encode(audio.data).decode("ascii"),
+        })
+
+    await websocket.send_json({
+        "type": "done", "model": turn.model,
+        "first_token_ms": round(turn.total_ms), "total_ms": round(turn.total_ms),
+    })
 
 
 async def _send_audio_in_order(

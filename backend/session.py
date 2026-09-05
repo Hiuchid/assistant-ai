@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from .degraded import DegradedCapture
 from .providers.llm import Message
@@ -61,16 +63,31 @@ class Conversation:
         self.turns.append(Turn(role=role, text=text, cancelled=cancelled))
         self.last_activity_at = time.time()
 
-    def messages(self) -> list[Message]:
+    def messages(self, tz: str = "UTC") -> list[Message]:
         """The system prompt plus the sliding window, in provider format.
+
+        The current local time is appended to the system prompt on every turn,
+        not baked in at session start. Without it the model cannot resolve
+        "Tuesday" or "tomorrow" and quietly guesses -- which produced a
+        calendar entry seven days out instead of on the day asked for. Built
+        per turn rather than once, so it stays right in a long conversation.
 
         TODO(phase-4): §6 also calls for a running summary of turns older than
         the window. Not implemented -- conversations currently truncate rather
         than compress, so anything said early is simply forgotten once it falls
         out of the window.
         """
+        now = datetime.now(ZoneInfo(tz))
         messages: list[Message] = [
-            {"role": "system", "content": self.system_prompt}
+            {
+                "role": "system",
+                "content": (
+                    f"{self.system_prompt}\n\n"
+                    f"The current local time is {now.isoformat(timespec='minutes')} "
+                    f"({now.strftime('%A')}). Resolve any relative day or time "
+                    f"against it."
+                ),
+            }
         ]
         for turn in self.turns[-WINDOW_TURNS:]:
             role: Literal["user", "assistant"] = (

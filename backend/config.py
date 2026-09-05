@@ -39,6 +39,9 @@ class LadderRung(BaseModel):
     requests_per_day: int
     tokens_per_minute: int
     tokens_per_day: int = 200_000
+    # compound-mini rejects tool calling outright, so the owner's
+    # tool-using turns skip it. It remains available for plain replies.
+    supports_tools: bool = True
     note: str = ""
 
 
@@ -75,6 +78,7 @@ DEFAULT_LADDER: tuple[LadderRung, ...] = (
         # preamble makes every call expensive, and this is the last rung
         # standing between a caller and the degraded script.
         tokens_per_day=100_000,
+        supports_tools=False,
         note="last resort: ~470-token agentic preamble, only 250 req/day",
     ),
 )

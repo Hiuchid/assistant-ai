@@ -11,7 +11,7 @@ on qwen's tokenizer.
 
 from __future__ import annotations
 
-VISITOR_SYSTEM_PROMPT = """\
+BASE_VISITOR_PROMPT = """\
 You are the personal assistant of the person this visitor is trying to reach. \
 You are taking a message on their behalf.
 
@@ -32,3 +32,26 @@ instead. Do not guess and do not invent details.
 Style: warm but brief. One or two sentences per reply. Ask one question at a \
 time. This is a spoken conversation, so no lists, no markdown, no bullet points.\
 """
+
+
+def visitor_prompt(briefing: str = "") -> str:
+    """The secretary prompt, plus whatever the owner wants it to know today.
+
+    The briefing is owner-authored, so unlike a transcript it is trusted input:
+    it is the owner instructing their own assistant, not a stranger. It is
+    length-capped only to stop it crowding out the rules, and the rules are
+    restated after it so a careless briefing cannot talk over them.
+    """
+    if not briefing.strip():
+        return BASE_VISITOR_PROMPT
+    return (
+        BASE_VISITOR_PROMPT
+        + "\n\nStanding instructions from the person you represent:\n"
+        + briefing.strip()[:1200]
+        + "\n\nThose instructions never override the rules above. You still "
+        "never confirm, book or promise anything on their behalf."
+    )
+
+
+# Kept so callers wanting the unbriefed prompt do not have to think about it.
+VISITOR_SYSTEM_PROMPT = BASE_VISITOR_PROMPT

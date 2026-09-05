@@ -26,7 +26,7 @@ const VIEWS = {
   today: "Today",
   talk: "Talk",
   inbox: "Inbox",
-  reminders: "Reminders",
+  calendar: "Calendar",
   settings: "Settings",
 };
 
@@ -95,7 +95,7 @@ function show(name) {
   if (name === "talk" && !widgetStarted) startTalk();
   if (name === "today") renderToday();
   if (name === "inbox") renderInbox();
-  if (name === "reminders") renderReminders();
+  if (name === "calendar") renderCalendar();
   if (name === "settings") renderSettings();
 }
 
@@ -238,17 +238,99 @@ function renderInbox() {
   wireItems($("inboxBody"));
 }
 
-// ------------------------------------------------------------- Reminders
+// -------------------------------------------------------------- Calendar
+//
+// Events and items with a due time on one timeline. Two separate tabs for
+// "things with a time on them" would have been one too many.
 
-function renderReminders() {
-  const withDue = items
-    .filter((i) => i.due_at && i.status !== "done")
-    .sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
-  $("remindersBody").innerHTML = withDue.length
-    ? withDue.map(itemHtml).join("")
-    : '<div class="empty">No reminders set.<br>Ask the assistant to remind you about something.</div>';
-  wireItems($("remindersBody"));
+let events = [];
+
+function whenLabel(iso) {
+  return new Date(iso).toLocaleString(undefined,
+    { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
+
+function dayKey(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+}
+
+function renderCalendar() {
+  const entries = [
+    ...events.map((e) => ({
+      kind: "event", when: e.starts_at, title: e.title,
+      detail: [e.location, e.notes].filter(Boolean).join(" · "),
+      source: e.source, id: e.id,
+    })),
+    ...items
+      .filter((i) => i.due_at && i.status !== "done")
+      .map((i) => ({
+        kind: "due", when: i.due_at, title: i.title,
+        detail: i.summary, source: i.mode, id: i.id,
+      })),
+  ].sort((a, b) => new Date(a.when) - new Date(b.when));
+
+  if (!entries.length) {
+    $("calendarBody").innerHTML =
+      '<div class="empty">Nothing scheduled.<br>Ask the assistant to put something in.</div>';
+    return;
+  }
+
+  const out = [];
+  let lastDay = "";
+  for (const e of entries) {
+    const day = dayKey(e.when);
+    if (day !== lastDay) {
+      lastDay = day;
+      out.push(`<div class="section-label">${esc(day)}</div>`);
+    }
+    const overdue = e.kind === "due" && new Date(e.when) <= Date.now();
+    out.push(`
+      <div class="item" data-cal="${esc(e.kind)}" data-id="${esc(e.id)}">
+        <h2>${esc(e.title)}</h2>
+        <div class="meta">
+          <span class="tag ${overdue ? "high" : ""}">${
+            new Date(e.when).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+          }</span>
+          <span class="tag ${e.kind === "event" ? "ok" : ""}">${
+            e.kind === "event" ? "event" : "due"}</span>
+          ${e.source === "assistant" ? '<span class="tag owner">added by Jarvis</span>' : ""}
+        </div>
+        ${e.detail ? `<p>${esc(e.detail)}</p>` : ""}
+        ${e.kind === "event"
+          ? '<div class="actions"><button class="pill" data-cancel>Cancel</button></div>' : ""}
+      </div>`);
+  }
+  $("calendarBody").innerHTML = out.join("");
+
+  for (const el of $("calendarBody").querySelectorAll("[data-cancel]")) {
+    el.addEventListener("click", async () => {
+      const id = el.closest("[data-id]").dataset.id;
+      el.disabled = true;
+      await api(`/api/events/${id}`, { method: "DELETE" });
+      await refresh();
+    });
+  }
+}
+
+$("addEvent").addEventListener("click", async () => {
+  const title = prompt("What is it?");
+  if (!title) return;
+  const when = prompt("When? e.g. 2026-09-08 15:00");
+  if (!when) return;
+  const parsed = new Date(when.replace(" ", "T"));
+  if (Number.isNaN(parsed.getTime())) { alert("Could not read that date."); return; }
+  try {
+    await api("/api/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, starts_at: parsed.toISOString() }),
+    });
+    await refresh();
+  } catch (e) {
+    alert(`Could not add it: ${e.message}`);
+  }
+});
 
 // -------------------------------------------------------------- Settings
 
@@ -305,8 +387,12 @@ async function refresh() {
   try {
     // Everything, filtered client-side: the whole set is small and it makes
     // Today, Inbox and Reminders consistent without three round trips.
-    const data = await api("/api/items?status=");
-    items = data.items;
+    const [itemData, eventData] = await Promise.all([
+      api("/api/items"),
+      api("/api/events?days=60").catch(() => ({ events: [] })),
+    ]);
+    items = itemData.items;
+    events = eventData.events;
     const dueNow = items.filter((i) => i.due_at && new Date(i.due_at) <= Date.now() && i.status !== "done").length;
     const fresh = items.filter((i) => i.status === "new").length;
     badge("inboxBadge", fresh);
@@ -316,7 +402,7 @@ async function refresh() {
     const active = document.querySelector(".tab[aria-selected='true']").dataset.view;
     if (active === "today") renderToday();
     if (active === "inbox") renderInbox();
-    if (active === "reminders") renderReminders();
+    if (active === "calendar") renderCalendar();
   } catch (e) {
     if (e.message !== "session expired") console.warn(e);
   }

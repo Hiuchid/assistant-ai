@@ -31,11 +31,11 @@ there is nothing to do, use an empty list.
 - title is a short label a person can scan in a list. No more than 8 words.
 - summary is 1-3 sentences of plain prose. No markdown, no bullet points.
 
-- due_at is an ISO 8601 timestamp WITH offset, e.g. 2026-09-11T09:00:00+03:00, \
-for anything time-bound: a reminder, a deadline, a callback time. Resolve \
-relative words against the current time given below. If no specific time was \
-given but a day was, use 09:00 local. Use null when nothing is time-bound - \
-do NOT invent a time to fill the field.
+- due_at is a local wall-clock time in ISO 8601 with NO offset, e.g. \
+2026-09-11T09:00, for anything time-bound: a reminder, a deadline or a \
+callback time. Resolve relative words against the current time below, and \
+write the time exactly as it was said. If a day was given but no time, use \
+09:00. Use null when nothing is time-bound - do NOT invent a time.
 
 Reply with ONLY a JSON object, no prose around it, with exactly these keys:
 type, title, summary, intent, action_items, urgency, contact, requested_slot,

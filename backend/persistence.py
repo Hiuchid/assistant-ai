@@ -291,7 +291,8 @@ class Store:
                    c.channel, c.degraded
               from tickets t
               join conversations c on c.id = t.conversation_id
-             where ($1::text is null or t.mode = $1)
+             where t.archived_at is null
+               and ($1::text is null or t.mode = $1)
                and ($2::text is null or t.status = $2)
              order by t.created_at desc
              limit $3
@@ -299,6 +300,29 @@ class Store:
             mode, status, limit,
         )
         return [dict(r) for r in rows]
+
+    async def archive_ticket(self, ticket_id: str) -> bool:
+        """Hide an item. Reversible -- nothing is destroyed.
+
+        This is as far as the assistant can go. Real erasure is a human action
+        via scripts/forget.py, because the text driving these decisions is
+        written by whoever called.
+        """
+        row = await self.pool.fetchrow(
+            "update tickets set archived_at = now() where id = $1::uuid returning id",
+            ticket_id,
+        )
+        return row is not None
+
+    async def set_ticket_due(self, ticket_id: str, due_at: datetime | None) -> bool:
+        row = await self.pool.fetchrow(
+            """
+            update tickets set due_at = $2, notified_at = null
+             where id = $1::uuid returning id
+            """,
+            ticket_id, due_at,
+        )
+        return row is not None
 
     async def set_ticket_status(self, ticket_id: str, status: str) -> bool:
         row = await self.pool.fetchrow(
@@ -388,6 +412,7 @@ class Store:
             select id::text as id, title, summary, due_at, mode, type, contact
               from tickets
              where due_at is not null
+               and archived_at is null
                and notified_at is null
                and status <> 'done'
                and due_at <= now()
@@ -400,6 +425,69 @@ class Store:
     async def mark_notified(self, ticket_id: str) -> None:
         await self.pool.execute(
             "update tickets set notified_at = now() where id = $1::uuid", ticket_id
+        )
+
+    # ------------------------------------------------------------- events
+
+    async def create_event(
+        self, *, title: str, starts_at: datetime, ends_at: datetime | None,
+        location: str | None, notes: str | None, ticket_id: str | None,
+        source: str = "owner",
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            insert into events (title, starts_at, ends_at, location, notes,
+                                ticket_id, source)
+            values ($1, $2, $3, $4, $5, $6::uuid, $7)
+            returning id::text as id, title, starts_at, ends_at, location,
+                      notes, source
+            """,
+            title, starts_at, ends_at, location, notes, ticket_id, source,
+        )
+        if row is None:
+            raise PersistenceError("event insert returned nothing")
+        return dict(row)
+
+    async def list_events(self, *, days: int = 14) -> list[dict[str, Any]]:
+        """Events in a window around now. Negative days looks backwards."""
+        lo, hi = (f"{days} days", "0 days") if days < 0 else ("0 days", f"{days} days")
+        rows = await self.pool.fetch(
+            f"""
+            select id::text as id, title, starts_at, ends_at, location, notes,
+                   source, ticket_id::text as ticket_id
+              from events
+             where not cancelled
+               and starts_at >= date_trunc('day', now()) - interval '{lo}'
+               and starts_at <= now() + interval '{hi}'
+             order by starts_at
+             limit 100
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def cancel_event(self, event_id: str) -> bool:
+        row = await self.pool.fetchrow(
+            "update events set cancelled = true where id = $1::uuid returning id",
+            event_id,
+        )
+        return row is not None
+
+    # ----------------------------------------------------------- settings
+
+    async def get_setting(self, key: str, default: str = "") -> str:
+        value = await self.pool.fetchval(
+            "select value from app_settings where key = $1", key
+        )
+        return str(value) if value is not None else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await self.pool.execute(
+            """
+            insert into app_settings (key, value) values ($1, $2)
+            on conflict (key) do update
+                set value = excluded.value, updated_at = now()
+            """,
+            key, value,
         )
 
     # ---------------------------------------------------------- retention

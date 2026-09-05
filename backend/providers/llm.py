@@ -20,7 +20,7 @@ import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Literal, Self, TypedDict
+from typing import Any, Literal, Protocol, Self, TypedDict
 
 import httpx
 
@@ -283,3 +283,148 @@ def _describe_http_error(status: int, headers: httpx.Headers, body: str) -> str:
         # logs rather than hanging the turn.
         return "401 unauthorized -- check GROQ_API_KEY"
     return f"HTTP {status}: {body}"
+
+
+# --------------------------------------------------------------------------
+# Tool-using completions (owner mode only)
+#
+# Deliberately NOT streamed. A tool loop has to see a whole response before it
+# knows whether to run a tool or reply, so streaming would buy nothing but
+# complexity -- and owner replies are a sentence or two, arriving in ~200ms.
+
+
+@dataclass(frozen=True)
+class ToolTurn:
+    text: str
+    model: str
+    hops: int
+    tools_used: list[str]
+    total_ms: float
+
+
+class ToolDispatcher(Protocol):
+    async def run(self, name: str, args: dict[str, Any]) -> Any: ...
+
+
+MAX_HOPS = 5
+
+
+class ToolLadder(GroqLadder):
+    """GroqLadder plus a tool-calling loop."""
+
+    async def complete_with_tools(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        dispatcher: ToolDispatcher,
+        *,
+        max_hops: int = MAX_HOPS,
+    ) -> ToolTurn:
+        started = time.perf_counter()
+        convo: list[dict[str, Any]] = [dict(m) for m in messages]
+        used: list[str] = []
+        failures: list[str] = []
+
+        rungs = [r for r in self._settings.ladder if r.supports_tools]
+        estimated = estimate_tokens(
+            [str(m.get("content") or "") for m in convo],
+            max_output=self._settings.llm_max_tokens,
+        )
+
+        for rung in rungs:
+            if (refusal := self.ledger.refusal(rung, estimated)) is not None:
+                failures.append(f"{rung.model}: {refusal}")
+                continue
+            try:
+                for hop in range(max_hops):
+                    reply = await self._one_completion(rung, convo, tools, estimated)
+                    calls = reply.get("tool_calls") or []
+                    if not calls:
+                        return ToolTurn(
+                            text=(reply.get("content") or "").strip(),
+                            model=rung.model,
+                            hops=hop,
+                            tools_used=used,
+                            total_ms=(time.perf_counter() - started) * 1000,
+                        )
+
+                    # The assistant turn carrying the calls must be replayed
+                    # verbatim, or the follow-up messages have nothing to
+                    # attach their tool_call_id to.
+                    convo.append(reply)
+                    for call in calls:
+                        name = call["function"]["name"]
+                        try:
+                            args = json.loads(call["function"].get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        used.append(name)
+                        log.info("tool call", extra={"tool": name, "model": rung.model})
+                        result = await dispatcher.run(name, args)
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": name,
+                            "content": json.dumps(result, default=str)[:6000],
+                        })
+
+                # Ran out of hops. Better a plain answer than an endless loop.
+                log.warning("tool loop hit the hop limit", extra={"model": rung.model})
+                return ToolTurn(
+                    text="I got a bit tangled up there. "
+                         "Could you ask me again, more simply?",
+                    model=rung.model, hops=max_hops, tools_used=used,
+                    total_ms=(time.perf_counter() - started) * 1000,
+                )
+            except _RungUnavailable as e:
+                failures.append(f"{rung.model}: {e}")
+                log.warning("tool rung unavailable",
+                            extra={"model": rung.model, "reason": str(e)})
+                continue
+
+        raise LadderExhausted("; ".join(failures) or "no tool-capable rung available")
+
+    async def _one_completion(
+        self, rung: LadderRung, convo: list[dict[str, Any]],
+        tools: list[dict[str, Any]], estimated: int,
+    ) -> dict[str, Any]:
+        quota = self.ledger.get(rung)
+        quota.record_dispatch(estimated)
+
+        payload: dict[str, object] = {
+            "model": rung.model,
+            "messages": convo,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": self._settings.llm_temperature,
+            "max_tokens": self._settings.llm_max_tokens,
+        }
+        if rung.reasoning_effort is not None:
+            payload["reasoning_effort"] = rung.reasoning_effort
+
+        response = await self._client.post("/chat/completions", json=payload)
+        if response.status_code != 200:
+            if response.status_code == 429:
+                retry_after = parse_reset(response.headers.get("retry-after"))
+                quota.mark_cold(retry_after if retry_after is not None else 60.0)
+            raise _RungUnavailable(
+                _describe_http_error(response.status_code, response.headers,
+                                     response.text[:300])
+            )
+
+        body = response.json()
+        usage = body.get("usage") or {}
+        quota.reconcile(
+            remaining_requests=response.headers.get("x-ratelimit-remaining-requests"),
+            remaining_tokens=response.headers.get("x-ratelimit-remaining-tokens"),
+            reset_requests=response.headers.get("x-ratelimit-reset-requests"),
+            reset_tokens=response.headers.get("x-ratelimit-reset-tokens"),
+            actual_tokens=(
+                usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+            ),
+            estimated_tokens=estimated,
+        )
+        message: dict[str, Any] = body["choices"][0]["message"]
+        # Reasoning is internal; replaying it wastes tokens on every hop.
+        message.pop("reasoning", None)
+        return message
