@@ -36,6 +36,10 @@ class Turn:
 
 @dataclass
 class Conversation:
+    # In-memory id, generated on connect. Distinct from db_id on purpose: this
+    # exists for logging from the moment a socket opens, whereas the row is
+    # only created once there is something worth recording (§3.3). Scanners
+    # open and drop sockets constantly and must not litter the table.
     id: str
     system_prompt: str
     channel: Literal["text", "voice"] = "text"
@@ -48,6 +52,10 @@ class Conversation:
     # of degraded mode: switching personas mid-call would be jarring, and the
     # scripted interview is only a few questions from finishing anyway.
     degraded: DegradedCapture | None = None
+
+    # Postgres id, set on the first turn or on a verified resume. None until
+    # then, and None for the whole session if persistence is unavailable.
+    db_id: str | None = None
 
     def add(self, role: Role, text: str, *, cancelled: bool = False) -> None:
         self.turns.append(Turn(role=role, text=text, cancelled=cancelled))

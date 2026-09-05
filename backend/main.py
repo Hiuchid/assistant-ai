@@ -17,15 +17,17 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Final
+from typing import Final, Literal
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
+from . import resume
 from .config import OWNER_VOICE, VISITOR_VOICE, Settings, get_settings
 from .degraded import ALL_FIXED_LINES, DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
+from .persistence import Store
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT
 from .providers.llm import (
     Completed,
@@ -43,7 +45,7 @@ from .providers.tts.fish import FishAudioTTS
 from .providers.tts.piper import PiperTTS
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
 from .sentences import SentenceSplitter
-from .session import Conversation, SessionStore
+from .session import Conversation, SessionStore, Turn
 
 VERSION: Final = "0.2.0"
 
@@ -71,6 +73,20 @@ messages_limiter = MessageRateLimiter(per_minute=settings.ws_max_messages_per_mi
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ladder = GroqLadder(settings)
     app.state.stt = GroqWhisper(settings)
+
+    # §3.3: the database is the source of truth. Without a DSN the assistant
+    # still runs, but nothing is recorded and no item can be generated -- so it
+    # is a loud warning, not a silent degradation.
+    app.state.store = None
+    if settings.supabase_db_dsn:
+        store = Store(settings.supabase_db_dsn)
+        try:
+            await store.connect()
+            app.state.store = store
+        except Exception as e:
+            log.error("persistence unavailable at startup", extra={"error": repr(e)})
+    else:
+        log.warning("no supabase_db_dsn configured; conversations are not recorded")
 
     # Chain in descending quality, ascending reliability (§4). Fish is skipped
     # entirely when no key is configured, so the service still speaks.
@@ -124,6 +140,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         warm.cancel()
         await app.state.ladder.aclose()
         await app.state.stt.aclose()
+        if app.state.store is not None:
+            await app.state.store.close()
         if app.state.fish is not None:
             await app.state.fish.aclose()
 
@@ -208,6 +226,8 @@ class ClientMessage(BaseModel):
     # base64 webm/opus from MediaRecorder, for type="audio"
     data: str = ""
     mime: str = "audio/webm"
+    # HMAC-signed token from a previous session, for type="hello"
+    token: str = ""
 
 
 @app.websocket("/ws/chat")
@@ -262,6 +282,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                 await websocket.send_json(
                     {"type": "error", "message": "malformed message"}
                 )
+                continue
+
+            if incoming.type == "hello":
+                await _resume_or_ignore(websocket, conversation, incoming.token)
                 continue
 
             # Sent the instant the client detects speech, before the audio
@@ -337,6 +361,101 @@ async def ws_chat(websocket: WebSocket) -> None:
         sessions.drop(conversation.id)
 
 
+async def _resume_or_ignore(
+    websocket: WebSocket, conversation: Conversation, token: str
+) -> None:
+    """Bind this socket to an earlier conversation, if the token proves it may.
+
+    §10 Phase 4: a bare conversation id is not accepted. The id lives inside an
+    HMAC-signed token, and a forged or expired one is refused -- silently, so a
+    prober learns nothing from the difference between "wrong signature" and
+    "no such conversation".
+    """
+    store: Store | None = websocket.app.state.store
+    secret = settings.resume_token_secret
+    if not token or store is None or not secret:
+        return
+
+    db_id = resume.verify(token, secret)
+    if db_id is None:
+        log.warning("resume refused: bad or expired token")
+        return
+
+    try:
+        if not await store.resumable(db_id):
+            log.info("resume refused: conversation not active")
+            return
+        history = await store.transcript(db_id)
+    except Exception as e:
+        log.error("resume lookup failed", extra={"error": repr(e)})
+        return
+
+    conversation.db_id = db_id
+    conversation.turns = [
+        Turn(role=t.role, text=t.text, cancelled=t.cancelled) for t in history
+    ]
+    log.info("conversation resumed", extra={"turns": len(history)})
+    await websocket.send_json(
+        {
+            "type": "resumed",
+            "turns": [
+                {"role": t.role, "text": t.text, "cancelled": t.cancelled}
+                for t in history
+            ],
+        }
+    )
+
+
+async def _persist_turn(
+    websocket: WebSocket,
+    conversation: Conversation,
+    *,
+    role: Literal["customer", "agent"],
+    text: str,
+    latency_ms: int | None = None,
+    cancelled: bool = False,
+) -> None:
+    """Write a turn as it happens (§3.3).
+
+    A failure here is logged loudly but never aborts the conversation: §6's
+    rule is that the caller is not dropped, and a gappy transcript is better
+    than a dead call. It must be visible though -- the item built from it will
+    be wrong.
+    """
+    store: Store | None = websocket.app.state.store
+    if store is None:
+        return
+    try:
+        if conversation.db_id is None:
+            # Created lazily: a socket that never says anything leaves no row.
+            conversation.db_id = await store.create_conversation(
+                mode=conversation.mode, channel=conversation.channel
+            )
+            if settings.resume_token_secret:
+                await websocket.send_json(
+                    {
+                        "type": "resume_token",
+                        "token": resume.issue(
+                            conversation.db_id,
+                            settings.resume_token_secret,
+                            ttl_s=settings.resume_ttl_s,
+                        ),
+                    }
+                )
+        await store.add_turn(
+            conversation.db_id,
+            role=role,
+            text=text,
+            latency_ms=latency_ms,
+            cancelled=cancelled,
+        )
+    except Exception as e:  # broad on purpose: no write failure may drop a call
+        log.error(
+            "turn not persisted -- transcript now has a gap",
+            extra={"role": role, "error": repr(e)},
+        )
+
+
 def _report_turn_failure(task: asyncio.Task[None]) -> None:
     """Surface exceptions from the un-awaited turn task.
 
@@ -388,6 +507,7 @@ async def _say(
     """
     text = " ".join(lines)
     conversation.add("agent", text)
+    await _persist_turn(websocket, conversation, role="agent", text=text)
     await websocket.send_json({"type": "token", "text": text})
 
     # These are the pre-rendered, pinned fixed phrases, so this is a cache
@@ -433,6 +553,7 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
     # §12: never log transcript content at INFO -- this is someone's message.
     log.debug("customer turn", extra={"chars": len(text)})
     conversation.add("customer", text)
+    await _persist_turn(websocket, conversation, role="customer", text=text)
 
     # Already in the scripted path: no model is involved, and none is needed.
     if conversation.degraded is not None:
@@ -475,6 +596,10 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
                 if tail := splitter.flush():
                     speak(tail)
                 conversation.add("agent", "".join(reply))
+                await _persist_turn(
+                    websocket, conversation, role="agent", text="".join(reply),
+                    latency_ms=round(event.total_ms),
+                )
                 await websocket.send_json(
                     {
                         "type": "done",
@@ -496,6 +621,10 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
         log.error("stream interrupted", extra={"error": str(e)})
         if reply:
             conversation.add("agent", "".join(reply), cancelled=True)
+            await _persist_turn(
+                websocket, conversation, role="agent", text="".join(reply),
+                cancelled=True,
+            )
         await websocket.send_json(
             {"type": "error", "message": "That reply got cut off. Say that again?"}
         )

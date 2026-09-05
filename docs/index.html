@@ -99,6 +99,17 @@ let socket = null;
 let streaming = null;   // the agent bubble currently being written into
 let retryDelay = 1000;
 
+// Resume token from the server, so a refresh continues the same conversation
+// rather than starting a new one. sessionStorage, not localStorage: it should
+// die with the tab, and it is a bearer credential for one conversation.
+const TOKEN_KEY = "assistant.resume";
+function storedToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+function storeToken(t) {
+  try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) { /* private mode */ }
+}
+
 // ---- audio playback ----------------------------------------------------
 // The server sends one complete audio file per sentence, in generation order.
 // decodeAudioData handles MP3 (edge-tts, Fish) and WAV (Piper) alike, so there
@@ -201,7 +212,21 @@ function connect() {
     const msg = JSON.parse(event.data);
 
     if (msg.type === "ready") {
-      // Nothing to show — the server is just handing us a conversation id.
+      // Offer any token we hold; the server ignores it unless it verifies.
+      const t = storedToken();
+      if (t) socket.send(JSON.stringify({ type: "hello", token: t }));
+      return;
+    }
+    if (msg.type === "resume_token") {
+      storeToken(msg.token);
+      return;
+    }
+    if (msg.type === "resumed") {
+      // Replay the transcript the database has, in its order -- not ours.
+      log.innerHTML = "";
+      for (const t of msg.turns) {
+        bubble(t.role === "customer" ? "user" : "agent", t.text);
+      }
       return;
     }
     if (msg.type === "interrupted") {

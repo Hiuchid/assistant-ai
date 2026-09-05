@@ -188,6 +188,21 @@ class Settings(BaseSettings):
     tts_breaker_failures: int = 3
     tts_breaker_cooldown_s: float = 300.0
 
+    # ---- Phase 4: persistence ----
+    # Direct Postgres rather than PostgREST (see persistence.py). IPv6 only --
+    # Supabase has no A record for db.<ref>.supabase.co.
+    supabase_db_dsn: str | None = None
+
+    # HMAC key for resume tokens. Without it, resuming is disabled rather than
+    # insecure: a bare conversation id must never be accepted (§10 Phase 4).
+    resume_token_secret: str | None = None
+    resume_ttl_s: int = 3600
+
+    # §9: the WS close handler cannot be relied on -- a hung socket never fires
+    # it -- so the sweeper drives ticket generation as well.
+    inactivity_minutes: int = 5
+    sweep_interval_s: int = 60
+
     # ---- Phase 3: voice input ----
     stt_model: str = "whisper-large-v3-turbo"
     # Pinned rather than auto-detected: Whisper hallucinates translations on
