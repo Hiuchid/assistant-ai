@@ -108,6 +108,8 @@ let decodeChain = Promise.resolve();  // keeps decodes in arrival order
 const audioQueue = [];
 let playing = false;
 let muted = false;
+let currentSource = null;   // the node actually sounding right now
+let audioEpoch = 0;         // bumped on every interruption
 
 function ensureAudio() {
   // Browsers block AudioContext until a user gesture; sending a message is one.
@@ -120,10 +122,15 @@ function enqueueAudio(msg) {
   if (muted || !audioCtx) return;
   // Chained rather than parallel: decodeAudioData resolves out of order for
   // differently-sized clips, which would play the reply's sentences shuffled.
+  const epoch = audioEpoch;
   decodeChain = decodeChain.then(async () => {
+    if (epoch !== audioEpoch) return;          // superseded before we started
     try {
       const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
       const buffer = await audioCtx.decodeAudioData(bytes.buffer);
+      // Check again: the interruption may have landed during the decode, and
+      // without this the cancelled reply resumes a moment later.
+      if (epoch !== audioEpoch) return;
       audioQueue.push(buffer);
       if (!playing) playNext();
     } catch (e) {
@@ -134,17 +141,29 @@ function enqueueAudio(msg) {
 
 function playNext() {
   const buffer = audioQueue.shift();
-  if (!buffer) { playing = false; return; }
+  if (!buffer) { playing = false; currentSource = null; return; }
   playing = true;
   const source = audioCtx.createBufferSource();
   source.buffer = buffer;
   source.connect(audioCtx.destination);
-  source.onended = playNext;
+  // Guarded: a source we stopped deliberately also fires onended, and without
+  // this check it would start the next sentence we just cancelled.
+  source.onended = () => { if (currentSource === source) playNext(); };
+  currentSource = source;
   source.start();
 }
 
 function stopAudio() {
+  // Bumping the epoch voids decodes still in flight for the cancelled reply.
+  audioEpoch++;
   audioQueue.length = 0;
+  if (currentSource) {
+    // Clearing the queue is not enough -- the sentence already sounding has to
+    // be stopped, or the assistant talks over the person interrupting it.
+    currentSource.onended = null;
+    try { currentSource.stop(); } catch (e) { /* already ended */ }
+    currentSource = null;
+  }
   playing = false;
 }
 
@@ -295,7 +314,12 @@ let pollTimer = null;
 const SILENCE_HANGOVER_MS = 900;   // quiet this long ends the utterance
 const MIN_UTTERANCE_MS = 400;      // shorter than this is a cough, not speech
 const SPEECH_MARGIN = 2.5;         // times the measured noise floor
+// Onset must sustain across a few polls. Without this, a single loud frame
+// starts a turn -- and on speakers, the assistant's own voice leaking past
+// echo cancellation would make it interrupt itself.
+const SPEECH_ONSET_FRAMES = 3;     // x 50ms poll = ~150ms sustained
 let speechStartedAt = 0;
+let loudFrames = 0;
 
 function rms() {
   const buf = new Float32Array(analyser.fftSize);
@@ -345,8 +369,9 @@ function poll() {
   if (!analyser) return;
   const level = rms();
   const loud = level > noiseFloor * SPEECH_MARGIN;
+  loudFrames = loud ? loudFrames + 1 : 0;
 
-  if (loud && !speaking) {
+  if (loudFrames >= SPEECH_ONSET_FRAMES && !speaking) {
     speaking = true;
     speechStartedAt = Date.now();
     micBtn.classList.add("hearing");
