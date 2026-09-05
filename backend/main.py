@@ -1,11 +1,16 @@
 """FastAPI application.
 
-Phase 0: health endpoint, CORS, structured logging, real client IPs behind nginx.
-Phase 1: the public WebSocket -- Origin check, per-IP limits, and the Groq
-ladder streamed token by token.
+Surfaces, in the order they were built:
 
-Not here yet: TTS (Phase 2), voice (Phase 3), persistence (Phase 4), owner mode
-and auth (Phase 4.5).
+- `GET /health` -- also echoes the caller's IP, which is how Phase 0's
+  proxy-header wiring stays verifiable (§4.2).
+- `POST /auth/login` -- first-party auth; users are our own rows.
+- `GET|PATCH /api/items` -- the dashboard reads through here rather than
+  through Supabase, because the browser now holds no Supabase credential.
+- `WS /ws/chat` -- the whole conversation pipeline. Origin-checked before
+  accept, since CORS does not apply to WebSocket handshakes.
+
+Phase 7's agent worker is deliberately not here.
 """
 
 from __future__ import annotations
@@ -17,9 +22,16 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
@@ -315,6 +327,83 @@ async def login(request: Request, body: LoginRequest) -> LoginResponse:
         token=auth.issue_session(row["id"], row["role"], secret),
         role=row["role"],
     )
+
+
+def _require_session(authorization: str | None) -> auth.Session:
+    """Authenticate a dashboard request, or refuse it.
+
+    Bearer token from /auth/login. There is no cookie and no CSRF surface,
+    because the token is only ever sent by fetch() from our own origin.
+    """
+    secret = settings.session_secret
+    if not secret:
+        raise HTTPException(status_code=503, detail="authentication unavailable")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="not authenticated")
+    session = auth.verify_session(authorization[7:], secret)
+    if session is None:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    return session
+
+
+def _require_store() -> Store:
+    store: Store | None = app.state.store
+    if store is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return store
+
+
+@app.get("/api/items")
+async def list_items(
+    mode: str | None = None,
+    status: str | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Items for the dashboard.
+
+    Deliberately not Supabase Realtime. The plan assumed the browser would
+    subscribe with the anon key, but users are our own rows now, so the browser
+    has no Supabase credential at all. The dashboard polls this instead --
+    which at a handful of items a day is entirely adequate and removes the last
+    reason for a key to exist in the frontend.
+    """
+    _require_session(authorization)
+    if mode not in (None, "owner", "visitor"):
+        raise HTTPException(status_code=400, detail="bad mode")
+    if status not in (None, "new", "triaged", "agent_queued", "done"):
+        raise HTTPException(status_code=400, detail="bad status")
+    items = await _require_store().list_tickets(mode=mode, status=status)
+    return {"items": items}
+
+
+@app.get("/api/items/{ticket_id}/transcript")
+async def item_transcript(
+    ticket_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    turns = await _require_store().ticket_transcript(ticket_id)
+    return {
+        "turns": [
+            {"role": t.role, "text": t.text, "cancelled": t.cancelled} for t in turns
+        ]
+    }
+
+
+class StatusUpdate(BaseModel):
+    status: Literal["new", "triaged", "agent_queued", "done"]
+
+
+@app.patch("/api/items/{ticket_id}")
+async def update_item(
+    ticket_id: str,
+    body: StatusUpdate,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    _require_session(authorization)
+    if not await _require_store().set_ticket_status(ticket_id, body.status):
+        raise HTTPException(status_code=404, detail="no such item")
+    return {"ok": True, "status": body.status}
 
 
 @app.websocket("/ws/chat")

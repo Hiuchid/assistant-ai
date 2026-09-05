@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inbox</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="centred" id="loginWrap" style="min-height:100dvh">
+  <div class="login">
+    <h1>Sign in</h1>
+    <p>Everything the assistant has taken down.</p>
+    <form id="loginForm" autocomplete="on">
+      <label for="email">Email</label>
+      <input type="email" id="email" required autocomplete="username">
+      <label for="password">Password</label>
+      <input type="password" id="password" required autocomplete="current-password">
+      <button type="submit" class="primary" id="loginBtn">Sign in</button>
+      <div class="err" id="loginErr" role="alert"></div>
+    </form>
+  </div>
+</div>
+
+<div class="wrap" id="app" hidden>
+  <div class="bar">
+    <h1>Inbox</h1>
+    <div class="filters" id="filters">
+      <button class="chip" data-filter="status" data-value="new" aria-pressed="true">New</button>
+      <button class="chip" data-filter="status" data-value="" aria-pressed="false">All</button>
+      <button class="chip" data-filter="mode" data-value="" aria-pressed="true">Both</button>
+      <button class="chip" data-filter="mode" data-value="visitor" aria-pressed="false">Inbound</button>
+      <button class="chip" data-filter="mode" data-value="owner" aria-pressed="false">Mine</button>
+    </div>
+    <span class="spacer"></span>
+    <span class="state" id="status">loading…</span>
+  </div>
+  <div class="items" id="items"></div>
+  <div class="empty" id="empty" hidden>Nothing here.</div>
+</div>
+
+<script type="module">
+const API = "https://assistant-ai.duckdns.org";
+const SESSION_KEY = "assistant.session";
+// Polled rather than pushed. The plan assumed Supabase Realtime with the anon
+// key, but the browser holds no Supabase credential now that users are our own
+// rows -- and at a handful of items a day, polling is entirely adequate and
+// keeps the frontend free of keys entirely.
+const POLL_MS = 8000;
+
+const $ = (id) => document.getElementById(id);
+let token = "";
+let filters = { status: "new", mode: "" };
+let timer = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+function when(iso) {
+  const d = new Date(iso), mins = Math.round((Date.now() - d) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return d.toLocaleDateString();
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) { signOut(); throw new Error("session expired"); }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function render(items) {
+  const box = $("items");
+  box.innerHTML = "";
+  $("empty").hidden = items.length > 0;
+
+  for (const it of items) {
+    const contact = Object.entries(it.contact || {})
+      .map(([k, v]) => `<span>${esc(k)}</span> <b>${esc(v)}</b>`).join("");
+    const todo = (it.action_items || [])
+      .map((a) => `<li>${esc(a)}</li>`).join("");
+
+    const el = document.createElement("div");
+    el.className = "item";
+    el.innerHTML = `
+      <h2>${esc(it.title)}</h2>
+      <div class="sub">
+        <span class="tag ${it.mode === "owner" ? "owner" : ""}">${esc(it.type)}</span>
+        ${it.urgency && it.urgency !== "low"
+          ? `<span class="tag ${esc(it.urgency)}">${esc(it.urgency)}</span>` : ""}
+        ${it.degraded ? '<span class="tag degraded">no model</span>' : ""}
+        <span>${esc(it.channel)}</span>
+        <span>${when(it.created_at)}</span>
+        <span>${esc(it.status)}</span>
+      </div>
+      <p>${esc(it.summary)}</p>
+      ${contact ? `<div class="contact">${contact}</div>` : ""}
+      ${it.requested_slot
+        ? `<div class="contact"><span>asked for</span> <b>${esc(it.requested_slot)}</b></div>` : ""}
+      ${todo ? `<ul class="todo">${todo}</ul>` : ""}
+      <details class="transcript"><summary>Transcript</summary>
+        <div class="body">loading…</div></details>
+      <div class="actions"></div>`;
+
+    const actions = el.querySelector(".actions");
+    for (const s of ["triaged", "done"]) {
+      if (it.status === s) continue;
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.textContent = `Mark ${s}`;
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        await api(`/api/items/${it.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: s }),
+        });
+        await refresh();
+      });
+      actions.appendChild(b);
+    }
+
+    // Fetched lazily: most items are actioned from the summary alone, and the
+    // transcript is the largest field by far.
+    const det = el.querySelector("details");
+    det.addEventListener("toggle", async () => {
+      const body = det.querySelector(".body");
+      if (!det.open || body.dataset.loaded) return;
+      body.dataset.loaded = "1";
+      try {
+        const { turns } = await api(`/api/items/${it.id}/transcript`);
+        body.innerHTML = turns.map((t) =>
+          `<div class="line"><b>${t.role === "customer" ? "Them" : "Assistant"}:</b> ` +
+          `${esc(t.text)}${t.cancelled ? " <i>(cut off)</i>" : ""}</div>`).join("")
+          || "<div class='line'>No turns recorded.</div>";
+      } catch {
+        body.textContent = "Could not load the transcript.";
+      }
+    });
+
+    box.appendChild(el);
+  }
+}
+
+async function refresh() {
+  try {
+    const q = new URLSearchParams();
+    if (filters.status) q.set("status", filters.status);
+    if (filters.mode) q.set("mode", filters.mode);
+    const { items } = await api(`/api/items?${q}`);
+    render(items);
+    $("status").textContent = `${items.length} item${items.length === 1 ? "" : "s"}`;
+  } catch (e) {
+    $("status").textContent = e.message;
+  }
+}
+
+function signOut() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+  clearInterval(timer);
+  token = "";
+  $("app").hidden = true;
+  $("loginWrap").hidden = false;
+}
+
+function launch(t) {
+  token = t;
+  $("loginWrap").hidden = true;
+  $("app").hidden = false;
+  refresh();
+  timer = setInterval(refresh, POLL_MS);
+}
+
+$("filters").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  const { filter, value } = chip.dataset;
+  filters[filter] = value;
+  for (const c of $("filters").querySelectorAll(`[data-filter="${filter}"]`)) {
+    c.setAttribute("aria-pressed", String(c === chip));
+  }
+  refresh();
+});
+
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("loginErr");
+  err.textContent = "";
+  $("loginBtn").disabled = true;
+  try {
+    const res = await fetch(`${API}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("email").value, password: $("password").value }),
+    });
+    if (!res.ok) {
+      err.textContent = res.status === 429
+        ? "Too many attempts. Wait a minute."
+        : "Those details were not accepted.";
+      return;
+    }
+    const { token: t } = await res.json();
+    try { sessionStorage.setItem(SESSION_KEY, t); } catch { /* private mode */ }
+    launch(t);
+  } catch {
+    err.textContent = "Could not reach the server.";
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+});
+
+let existing = "";
+try { existing = sessionStorage.getItem(SESSION_KEY) || ""; } catch { /* ignore */ }
+if (existing) launch(existing);
+</script>
+</body>
+</html>

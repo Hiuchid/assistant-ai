@@ -31,7 +31,11 @@ from backend.summarize import (
 
 def test_extracts_json_wrapped_in_prose() -> None:
     """Models add "Here is the JSON:" no matter how firmly you ask them not to."""
-    raw = 'Sure! Here you go:\n```json\n{"type": "message", "title": "x"}\n```\nHope that helps.'
+    raw = (
+        "Sure! Here you go:\n"
+        '```json\n{"type": "message", "title": "x"}\n```\n'
+        "Hope that helps."
+    )
     assert _extract_json(raw) == {"type": "message", "title": "x"}
 
 

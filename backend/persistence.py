@@ -260,6 +260,52 @@ class Store:
         )
         return row is not None
 
+    async def list_tickets(
+        self, *, mode: str | None = None, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            select t.id::text as id, t.type, t.title, t.summary, t.intent,
+                   t.action_items, t.urgency, t.contact, t.requested_slot,
+                   t.mode, t.status, t.created_at,
+                   c.channel, c.degraded
+              from tickets t
+              join conversations c on c.id = t.conversation_id
+             where ($1::text is null or t.mode = $1)
+               and ($2::text is null or t.status = $2)
+             order by t.created_at desc
+             limit $3
+            """,
+            mode, status, limit,
+        )
+        return [dict(r) for r in rows]
+
+    async def set_ticket_status(self, ticket_id: str, status: str) -> bool:
+        row = await self.pool.fetchrow(
+            """
+            update tickets set status = $2 where id = $1::uuid returning id
+            """,
+            ticket_id, status,
+        )
+        return row is not None
+
+    async def ticket_transcript(self, ticket_id: str) -> list[StoredTurn]:
+        rows = await self.pool.fetch(
+            """
+            select tn.id, tn.role, tn.text, tn.cancelled
+              from turns tn
+              join tickets tk on tk.conversation_id = tn.conversation_id
+             where tk.id = $1::uuid
+             order by tn.id
+            """,
+            ticket_id,
+        )
+        return [
+            StoredTurn(seq=int(r["id"]), role=r["role"], text=r["text"],
+                       cancelled=r["cancelled"])
+            for r in rows
+        ]
+
     # ------------------------------------------------------------ sweeping
 
     async def stale_conversations(self, idle_minutes: int) -> list[str]:
