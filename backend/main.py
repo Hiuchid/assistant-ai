@@ -19,15 +19,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Final, Literal
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
-from . import resume
+from . import auth, resume
 from .config import OWNER_VOICE, VISITOR_VOICE, Settings, get_settings
 from .degraded import ALL_FIXED_LINES, DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
 from .persistence import Store
+from .prompts.owner import OWNER_SYSTEM_PROMPT
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT
 from .providers.llm import (
     Completed,
@@ -67,6 +68,12 @@ connections = ConnectionLimiter(
 # ceiling. A session becomes "voice" the first time it sends audio.
 voice_sessions = ConnectionLimiter(per_ip=1, total=settings.max_concurrent_voice)
 messages_limiter = MessageRateLimiter(per_minute=settings.ws_max_messages_per_minute)
+# Much tighter than the chat limiter: this endpoint exists to be guessed at.
+login_limiter = MessageRateLimiter(per_minute=settings.login_attempts_per_minute)
+
+# Compared against when the email is unknown, so a missing account costs the
+# same time as a wrong password and cannot be told apart from one.
+_DUMMY_HASH = auth.hash_password("this is not anybody's password")
 
 
 @asynccontextmanager
@@ -228,6 +235,57 @@ class ClientMessage(BaseModel):
     mime: str = "audio/webm"
     # HMAC-signed token from a previous session, for type="hello"
     token: str = ""
+    # Session token from /auth/login, for type="hello". Its absence, or any
+    # failure to verify it, leaves the caller a visitor.
+    session: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    role: str
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+async def login(request: Request, body: LoginRequest) -> LoginResponse:
+    """Exchange an email and password for a session token.
+
+    Users are our own rows, not Supabase Auth. Failures are deliberately
+    indistinguishable -- unknown email, wrong password and disabled account all
+    return the same 401, so the endpoint cannot be used to enumerate accounts.
+    """
+    store: Store | None = app.state.store
+    secret = settings.session_secret
+    if store is None or not secret:
+        raise HTTPException(status_code=503, detail="authentication unavailable")
+
+    ip = request.client.host if request.client else "unknown"
+    if not login_limiter.allow(ip):
+        # Password guessing is the one thing this endpoint is for, from an
+        # attacker's point of view. Per-IP, and far tighter than the chat limit.
+        log.warning("login rate limited", extra={"client_ip": ip})
+        raise HTTPException(status_code=429, detail="too many attempts")
+
+    row = await store.find_user(body.email.strip().lower())
+    # Verify even when the user does not exist, against a dummy hash, so the
+    # response time does not reveal which emails are registered.
+    stored_hash = row["password_hash"] if row else _DUMMY_HASH
+    ok = auth.verify_password(body.password, stored_hash)
+
+    if row is None or not ok or row["disabled"]:
+        log.warning("login failed", extra={"client_ip": ip})
+        raise HTTPException(status_code=401, detail="invalid credentials")
+
+    await store.record_login(row["id"])
+    log.info("login ok", extra={"role": row["role"], "client_ip": ip})
+    return LoginResponse(
+        token=auth.issue_session(row["id"], row["role"], secret),
+        role=row["role"],
+    )
 
 
 @app.websocket("/ws/chat")
@@ -285,7 +343,14 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
 
             if incoming.type == "hello":
+                # §3.7: mode is derived from a verified session, never from
+                # anything the client asserts. There is no "mode" field in the
+                # protocol precisely so it cannot be asked for.
+                _apply_session(conversation, incoming.session)
                 await _resume_or_ignore(websocket, conversation, incoming.token)
+                await websocket.send_json(
+                    {"type": "mode", "mode": conversation.mode}
+                )
                 continue
 
             # Sent the instant the client detects speech, before the audio
@@ -359,6 +424,25 @@ async def ws_chat(websocket: WebSocket) -> None:
             voice_sessions.release(ip)
         connections.release(ip)
         sessions.drop(conversation.id)
+
+
+def _apply_session(conversation: Conversation, token: str) -> None:
+    """Promote this conversation to owner mode, if the token proves it may.
+
+    A forged, expired or absent token leaves `mode` at its default of visitor.
+    That default is what makes this safe: the failure direction is downgrade,
+    never upgrade.
+    """
+    secret = settings.session_secret
+    if not token or not secret:
+        return
+    session = auth.verify_session(token, secret)
+    if session is None:
+        log.warning("session refused: bad or expired token")
+        return
+    conversation.mode = "owner"
+    conversation.system_prompt = OWNER_SYSTEM_PROMPT
+    log.info("owner mode", extra={"user_id": session.user_id, "role": session.role})
 
 
 async def _resume_or_ignore(

@@ -12,6 +12,7 @@ import time
 import pytest
 
 from backend import resume
+from backend.signing import b64
 
 SECRET = "a" * 64
 OTHER_SECRET = "b" * 64
@@ -43,7 +44,7 @@ def test_tampering_with_the_payload_refused() -> None:
     """Swapping in a different conversation id must invalidate the signature."""
     token = resume.issue(CONVERSATION, SECRET)
     _, signature = token.split(".", 1)
-    other = resume._b64(b"00000000-0000-0000-0000-000000000000:99999999999")
+    other = b64(b"00000000-0000-0000-0000-000000000000:99999999999")
     assert resume.verify(f"{other}.{signature}", SECRET) is None
 
 

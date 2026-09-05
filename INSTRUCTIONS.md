@@ -137,6 +137,43 @@ degrading under sustained load. So:
 
 ---
 
+## 2b. **[r5] Users are our own rows, not Supabase Auth
+
+Operator decision, and it simplifies the security model rather than complicating
+it. `auth.users`, the `operators` allowlist and every RLS policy scoped to
+`auth.uid()` are gone, replaced by a first-party `users` table.
+
+The consequence worth stating plainly:
+
+> **The frontend no longer authenticates to Supabase at all.** It talks only to
+> our backend, which connects to Postgres directly as the owner role. The
+> anon/publishable key therefore has no consumer, and **§3.1's "no keys in the
+> frontend" rule goes back to being absolute** — the carve-out r2 had to add is
+> withdrawn.
+
+- **RLS is enabled on every table with zero policies.** Deny-by-default: anything
+  arriving over PostgREST or a publishable key sees nothing, whatever it
+  presents. Verified — `set role anon; select count(*) from tickets;` returns 0
+  against populated tables.
+- **Passwords use scrypt from `hashlib`** (RFC 7914 interactive parameters). No
+  new dependency, and memory-hardness is the property that matters offline.
+  Parameters are read back from the stored hash, so raising the cost later does
+  not invalidate existing hashes.
+- **Sessions are HMAC tokens**, sharing `signing.py` with resume tokens. Not JWT:
+  one issuer, one consumer, no rotation, and no algorithm-confusion foot-gun.
+- **Login failures are indistinguishable.** Unknown email, wrong password and
+  disabled account all return the same 401, and an unknown email is still
+  verified against a dummy hash so timing does not reveal which addresses exist.
+  Rate limited to 5 attempts/minute per IP.
+- **Accounts are created by `scripts/create_operator.py`**, run on the VPS. The
+  password is read with `getpass` — never echoed, never an argument, never
+  logged. Nobody but the operator ever sees it.
+
+**Verified 2026-09-05:** wrong password 401, unknown email 401, correct 200;
+no session → visitor, **forged session → visitor**, valid session → owner.
+
+---
+
 ## 3. Non-negotiables
 
 1. **No provider API keys in the frontend, ever.** All provider keys live in the VPS

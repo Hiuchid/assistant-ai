@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     # spends finite quota. Per-IP limits, not global.
     ws_max_connections_per_ip: int = 3
     ws_max_messages_per_minute: int = 20
+    # Far tighter: this endpoint exists to be guessed at.
+    login_attempts_per_minute: int = 5
 
     # How long a conversation may sit idle before its in-memory state is
     # dropped. Phase 4 replaces this with the database + sweeper.
@@ -192,6 +194,17 @@ class Settings(BaseSettings):
     # Direct Postgres rather than PostgREST (see persistence.py). IPv6 only --
     # Supabase has no A record for db.<ref>.supabase.co.
     supabase_db_dsn: str | None = None
+
+    # HMAC key for session tokens (first-party auth -- users are our own rows,
+    # not Supabase Auth). Without it, owner mode is unreachable rather than
+    # insecure: every session verifies to None and the caller stays a visitor.
+    session_secret: str | None = None
+
+    # Recorded for completeness; nothing uses them. The frontend never talks to
+    # Supabase directly now, so the publishable key has no consumer, and the
+    # backend connects as the owner role over the DSN rather than PostgREST.
+    supabase_service_role_key: str | None = None
+    supabase_anon_key: str | None = None
 
     # HMAC key for resume tokens. Without it, resuming is disabled rather than
     # insecure: a bare conversation id must never be accepted (§10 Phase 4).

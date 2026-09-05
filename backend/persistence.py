@@ -7,8 +7,12 @@ Postgres -- never from a transcript the client hands us at the end.
 **Direct Postgres rather than the REST API.** The plan said "Supabase writes
 (service role key)". A direct asyncpg connection as the `postgres` role does
 the same job, bypasses PostgREST entirely, gives real transactions, and needs
-one fewer credential. The service role key is still required for nothing here;
-the dashboard uses the anon key under RLS (§8).
+one fewer credential.
+
+Since users are our own rows rather than Supabase Auth, nothing but this
+process ever connects: the dashboard reads through our API, not through
+PostgREST. RLS is therefore enabled with no policies at all -- deny-by-default
+for every role except the owner, which is us.
 
 The connection is IPv6-only -- Supabase moved direct connections off IPv4, and
 `db.<ref>.supabase.co` has no A record. This VPS has IPv6 egress; a host
@@ -188,6 +192,25 @@ class Store:
             )
             for r in rows
         ]
+
+    # ----------------------------------------------------------------- users
+
+    async def find_user(self, email: str) -> dict[str, Any] | None:
+        """Look up a user by email. Returns None rather than raising."""
+        row = await self.pool.fetchrow(
+            """
+            select id::text as id, email, password_hash, role, disabled
+              from users
+             where email = $1
+            """,
+            email,
+        )
+        return dict(row) if row else None
+
+    async def record_login(self, user_id: str) -> None:
+        await self.pool.execute(
+            "update users set last_login_at = now() where id = $1::uuid", user_id
+        )
 
     # ------------------------------------------------------------ sweeping
 
