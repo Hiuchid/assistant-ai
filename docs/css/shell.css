@@ -10,34 +10,48 @@
  */
 
 :root {
-  --bg: #0e1220;
-  --page: #070a14;
-  --surface: #171d2e;
-  --surface-2: #212a3f;
-  --border: #2c3550;
+  /* The same warm neutral scheme as css/app.css, which the landing page, the
+     visitor widget and the message page all use. The app used to be navy and
+     indigo, which made it look like a different product to the one people are
+     sent a link to.
 
-  --text: #e6e9f3;
-  --text-dim: #a7b0c7;
-  --text-faint: #8b95ad;
+     Light is the default and dark is a media query, exactly as app.css has it,
+     and color-scheme tells the browser to render the date pickers, time
+     pickers and selects in the sheet to match -- they are native controls and
+     will otherwise be white boxes on a dark form. */
+  color-scheme: light dark;
 
-  --primary: #4a63b8;
-  --primary-soft: #94a9f0;
-  --primary-strong: #3a4f96;
-  --on-primary: #f2f5ff;
+  --page: #f2f1ed;
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --surface-2: #f2f1ed;
+  --border: #e6e4df;
 
-  --bubble-ai: #1a2133;
-  --bubble-user-1: #4a5fae;
-  --bubble-user-2: #37478a;
-  --bubble-user-text: #eff2fd;
+  --text: #1b1b1a;
+  --text-dim: #6b6b68;
+  --text-faint: #8f8f8a;
 
-  --danger: #ef7f76;
-  --warn: #d9a94f;
-  --ok: #6fce9f;
-  --info: #74b6ee;
+  /* Monochrome, like the landing page's buttons: the accent is simply the
+     foreground, and what sits on it is the background. */
+  --primary: #1b1b1a;
+  --primary-soft: #1b1b1a;
+  --primary-strong: #000000;
+  --on-primary: #faf9f7;
 
-  --header-grad-1: #1e2748;
-  --header-grad-2: #131a33;
-  --nav-bg: rgba(15, 20, 34, 0.86);
+  --bubble-ai: #f2f1ed;
+  --bubble-user-1: #1b1b1a;
+  --bubble-user-text: #faf9f7;
+
+  --danger: #b3261e;
+  --warn: #a1620a;
+  --ok: #137a4b;
+  --info: #6b6b68;
+
+  --header-bg: #faf9f7;
+  --nav-bg: rgba(250, 249, 247, .88);
+  /* A wash of the foreground, for hovers and the selected tab's puck. */
+  --tint: rgba(27, 27, 26, .07);
+  --scrim: rgba(27, 27, 26, .38);
 
   --r-sm: 8px;
   --r-md: 12px;
@@ -58,7 +72,7 @@
   --fs-title: 1.3125rem;
   --fs-large-title: 1.75rem;
 
-  --shadow-2: 0 2px 6px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.45);
+  --shadow-2: 0 1px 3px rgba(0,0,0,.06), 0 10px 30px rgba(0,0,0,.10);
   --tap: 44px;
   --ease-out: cubic-bezier(.22, 1, .36, 1);
 
@@ -70,6 +84,40 @@
 }
 @media (min-width: 900px)  { :root { --frame: 620px; } }
 @media (min-width: 1200px) { :root { --frame: 760px; } }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0e;
+    --bg: #131314;
+    --surface: #1a1a1c;
+    --surface-2: #232326;
+    --border: #2c2c2f;
+
+    --text: #e9e8e4;
+    --text-dim: #98978f;
+    --text-faint: #77766f;
+
+    --primary: #e9e8e4;
+    --primary-soft: #e9e8e4;
+    --primary-strong: #ffffff;
+    --on-primary: #131314;
+
+    --bubble-ai: #232326;
+    --bubble-user-1: #e9e8e4;
+    --bubble-user-text: #131314;
+
+    --danger: #f87171;
+    --warn: #fbbf24;
+    --ok: #4ade80;
+    --info: #98978f;
+
+    --header-bg: #131314;
+    --nav-bg: rgba(19, 19, 20, .88);
+    --tint: rgba(233, 232, 228, .11);
+    --scrim: rgba(0, 0, 0, .62);
+    --shadow-2: 0 1px 3px rgba(0,0,0,.5), 0 10px 30px rgba(0,0,0,.55);
+  }
+}
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
@@ -135,7 +183,7 @@ body {
 
 /* ---------- header ---------- */
 .appbar {
-  background: linear-gradient(180deg, var(--header-grad-1), var(--header-grad-2));
+  background: var(--header-bg);
   padding: calc(var(--sp-3) + env(safe-area-inset-top, 0px)) var(--sp-4) var(--sp-3);
   display: flex; align-items: center; gap: var(--sp-3);
 }
@@ -152,7 +200,7 @@ body {
   border-radius: var(--r-sm); cursor: pointer;
   transition: color .12s, background .12s;
 }
-.iconbtn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.iconbtn:hover { color: var(--text); background: var(--tint); }
 .iconbtn:active { transform: scale(.93); }
 .iconbtn svg { width: 21px; height: 21px; }
 
@@ -271,7 +319,7 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .msg { max-width: 84%; padding: 10px 14px; border-radius: var(--r-lg); white-space: pre-wrap; word-wrap: break-word; font-size: var(--fs-callout); }
 .msg.agent { background: var(--bubble-ai); align-self: flex-start; border-bottom-left-radius: var(--r-sm); }
 .msg.user {
-  background: linear-gradient(180deg, var(--bubble-user-1), var(--bubble-user-2));
+  background: var(--bubble-user-1);
   color: var(--bubble-user-text); align-self: flex-end; border-bottom-right-radius: var(--r-sm);
 }
 .msg.error { background: transparent; border: 1px solid var(--danger); color: var(--danger); align-self: stretch; max-width: 100%; font-size: var(--fs-footnote); }
@@ -340,10 +388,10 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .tab svg { width: 19px; height: 19px; }
 .tab small { font-size: var(--fs-caption-2); letter-spacing: 0; }
 .tab[aria-selected="true"] { color: var(--primary-soft); }
-.tab[aria-selected="true"] .puck { background: rgba(74, 99, 184, .22); }
+.tab[aria-selected="true"] .puck { background: var(--tint); }
 .tab .badge {
   position: absolute; top: 4px; left: 50%; transform: translateX(6px);
-  background: var(--danger); color: #2a0e0c; font-size: 10px; font-weight: 700;
+  background: var(--danger); color: var(--bg); font-size: 10px; font-weight: 700;
   border-radius: 999px; min-width: 16px; padding: 0 4px; line-height: 16px;
 }
 
@@ -357,7 +405,7 @@ details.tr .line b { color: var(--text); font-weight: 550; }
   width: min(92vw, 340px);
   box-shadow: var(--shadow-2);
 }
-.login-dialog::backdrop { background: rgba(3, 5, 12, .72); backdrop-filter: blur(3px); }
+.login-dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 .login-card { width: 100%; }
 .login-card h1 { font-size: var(--fs-title); margin: 0 0 var(--sp-1); letter-spacing: -.02em; }
 .login-card p { color: var(--text-dim); font-size: var(--fs-subhead); margin: 0 0 var(--sp-5); }
@@ -425,7 +473,10 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
 .cd {
   position: relative;
-  aspect-ratio: 1;
+  /* Wider than tall. A square cell is a lot of empty box for a two-digit
+     number, and seven of them stacked six deep filled a phone screen. */
+  aspect-ratio: 1 / .82;
+  min-height: 42px;
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -446,17 +497,29 @@ details.tr .line b { color: var(--text); font-weight: 550; }
 .cd.today .n { color: var(--primary-soft); font-weight: 750; }
 .cd[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); }
 .cd[aria-pressed="true"] .n { color: var(--on-primary); }
-.cd .dots { display: flex; gap: 2px; height: 4px; }
-.cd .dots i { width: 4px; height: 4px; border-radius: 50%; display: block; }
+.cd .dots { display: flex; gap: 3px; height: 5px; }
+.cd .dots i { width: 5px; height: 5px; border-radius: 50%; display: block; }
 .cd .dots i.ev { background: var(--warn); }
 .cd .dots i.tk { background: var(--primary-soft); }
 .cd .dots i.msg { background: var(--info); }
 .cd[aria-pressed="true"] .dots i { background: var(--on-primary); }
 /* A bar under the number marks a day inside a multi-day event. */
-.cd .rng { position: absolute; bottom: 3px; left: 6px; right: 6px; height: 2px; border-radius: 2px; background: rgba(217, 169, 79, .55); }
+.cd .rng { position: absolute; bottom: 3px; left: 5px; right: 5px;
+           height: 2px; border-radius: 2px; background: var(--warn); opacity: .7; }
+
+/* what the dots mean, said once rather than guessed at */
+.legend {
+  display: flex; gap: var(--sp-3); justify-content: center;
+  margin-top: var(--sp-2); font-size: var(--fs-caption-2); color: var(--text-faint);
+}
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 5px; height: 5px; border-radius: 50%; display: block; }
+.legend i.ev { background: var(--warn); }
+.legend i.tk { background: var(--primary-soft); }
+.legend i.msg { background: var(--info); }
 
 /* the four counters under the grid */
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); margin: var(--sp-4) 0; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); margin: var(--sp-3) 0; }
 .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 9px 6px; min-width: 0; text-align: center; }
 .stat .v { font-size: var(--fs-headline); font-weight: 700; line-height: 1.2; }
 .stat .l { font-size: var(--fs-caption-2); color: var(--text-faint); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -500,7 +563,7 @@ details.tr .line b { color: var(--text); font-weight: 550; }
   line-height: 1;
   padding: 0;
 }
-.ck[aria-pressed="true"] { background: var(--ok); border-color: var(--ok); color: #06281a; }
+.ck[aria-pressed="true"] { background: var(--ok); border-color: var(--ok); color: var(--bg); }
 
 .pdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .pdot.high { background: var(--danger); }
@@ -553,7 +616,7 @@ details.tr .line b { color: var(--text); font-weight: 550; }
   margin: auto auto 0;
   color: var(--text);
 }
-.sheet::backdrop { background: rgba(3, 5, 12, .72); }
+.sheet::backdrop { background: var(--scrim); }
 .sheet form {
   background: var(--bg);
   border: 1px solid var(--border);

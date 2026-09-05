@@ -477,6 +477,16 @@ function weekStart(key) {
   return dayKey(d);
 }
 
+function monthEnd(month) {
+  const [y, m] = month.split("-").map(Number);
+  return dayKey(new Date(y, m, 0)); // day 0 of the next month is the last of this
+}
+
+// Rounded, because a clock change makes one of these days 23 or 25 hours long.
+function daysApart(from, to) {
+  return Math.round((fromKey(to) - fromKey(from)) / 86400000);
+}
+
 function dayName(key) {
   const today = dayKey(new Date());
   if (key === today) return "Today";
@@ -832,8 +842,12 @@ function renderCalendar() {
     { month: "long", year: "numeric" });
 
   const start = weekStart(first);
+  // Only the weeks this month actually touches. A fixed six rows added a whole
+  // greyed-out week to most months, and that week was pushing the agenda for
+  // the selected day off the bottom of a phone.
+  const weeks = daysApart(start, weekStart(monthEnd(calMonth))) / 7 + 1;
   const cells = [];
-  for (let i = 0; i < 42; i++) {
+  for (let i = 0; i < weeks * 7; i++) {
     const key = addDays(start, i);
     const dayEvents = events.filter((e) => eventOn(e, key));
     const multi = dayEvents.some((e) => { const [f, t] = eventDays(e); return f !== t; });
@@ -866,6 +880,11 @@ function renderCalendar() {
     stat("Open", open.length, "") +
     stat("Overdue", overdue, overdue ? "bad" : "good") +
     stat("Done", tasks.length - open.length, "good");
+
+  $("calLegend").innerHTML =
+    '<span><i class="ev"></i>event</span>'
+    + '<span><i class="tk"></i>task</span>'
+    + '<span><i class="msg"></i>message</span>';
 
   $("dayLabel").textContent = dayName(selDay);
   renderAgenda();
@@ -1080,7 +1099,14 @@ $("view-planner").addEventListener("click", async (e) => {
   }
 
   const day = e.target.closest("[data-day]");
-  if (day) { selDay = day.dataset.day; renderCalendar(); return; }
+  if (day) {
+    selDay = day.dataset.day;
+    // Tapping into the greyed week either side moves the month with it,
+    // rather than selecting a day that is no longer on the grid.
+    if (selDay.slice(0, 7) !== calMonth) calMonth = selDay.slice(0, 7);
+    renderCalendar();
+    return;
+  }
 
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
