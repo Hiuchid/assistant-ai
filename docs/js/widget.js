@@ -20,7 +20,8 @@ const SPEECH_MARGIN = 2.5;         // times the measured noise floor
 const SPEECH_ONSET_FRAMES = 3;     // x 50 ms poll = ~150 ms sustained
 const POLL_MS = 50;
 
-export function startWidget({ wsUrl, sessionToken = "", tokenKey, el }) {
+export function startWidget({ wsUrl, sessionToken = "", tokenKey, el,
+                             consentNotice = "" }) {
   let socket = null;
   let streaming = null;      // the agent bubble currently being written into
   let retryDelay = 1000;
@@ -347,10 +348,27 @@ export function startWidget({ wsUrl, sessionToken = "", tokenKey, el }) {
     if (muted) stopAudio();
   });
 
+  // §13: visitor mode collects other people's data, so the microphone is
+  // gated behind an explicit acknowledgement the first time. Remembered per
+  // tab, not forever -- consent that silently persists across sessions is not
+  // much of a consent.
+  const CONSENT_KEY = "assistant.consent";
+  function hasConsented() {
+    if (!consentNotice) return true;      // owner mode: no notice, no gate
+    try { return sessionStorage.getItem(CONSENT_KEY) === "1"; } catch { return false; }
+  }
+  function recordConsent() {
+    try { sessionStorage.setItem(CONSENT_KEY, "1"); } catch { /* private mode */ }
+  }
+
   el.mic.addEventListener("click", async () => {
     try {
-      if (listening) stopListening();
-      else await startListening();
+      if (listening) { stopListening(); return; }
+      if (!hasConsented()) {
+        if (!window.confirm(consentNotice)) return;
+        recordConsent();
+      }
+      await startListening();
     } catch (e) {
       bubble("error", "Could not access the microphone: " + e.message);
       stopListening();

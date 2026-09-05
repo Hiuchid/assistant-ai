@@ -112,3 +112,56 @@ details.transcript { margin-top:10px; }
 details.transcript summary { cursor:pointer; color:var(--mut); font-size:12px; }
 details.transcript .line { font-size:13px; margin:6px 0; }
 details.transcript .line b { font-weight:550; }
+
+/* ---------- landing ---------- */
+.landing { min-height:100dvh; display:flex; flex-direction:column; }
+.topbar {
+  display:flex; align-items:center; gap:10px; padding:14px 22px;
+  border-bottom:1px solid var(--line);
+}
+.brand { font-weight:600; letter-spacing:-0.01em; }
+.topbar .spacer { margin-left:auto; }
+.who { font-size:12px; color:var(--mut); }
+
+.hero { flex:1; max-width:920px; margin:0 auto; padding:64px 22px 60px; width:100%; }
+.hero h1 {
+  margin:0 0 12px; font-size:clamp(26px, 5vw, 38px); line-height:1.15;
+  letter-spacing:-0.025em; font-weight:650;
+}
+.lede { margin:0 0 40px; color:var(--mut); font-size:16px; max-width:52ch; }
+
+.cards { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); }
+.card {
+  position:relative; display:flex; flex-direction:column; gap:6px;
+  padding:20px; border:1px solid var(--line); border-radius:13px;
+  background:var(--panel); color:inherit; text-decoration:none;
+  transition:border-color .15s, transform .15s;
+}
+.card:hover { border-color:var(--accent); transform:translateY(-2px); }
+.card-icon { font-size:22px; line-height:1; }
+.card h2 { margin:4px 0 0; font-size:15px; font-weight:600; }
+.card p { margin:0; font-size:13px; color:var(--mut); flex:1; }
+.card-go { font-size:13px; font-weight:550; margin-top:8px; }
+.card-lock { display:none; font-size:11px; color:var(--mut); margin-top:8px; }
+.card.locked .card-go { display:none; }
+.card.locked .card-lock { display:block; }
+.card.locked { opacity:.72; }
+
+.status { margin-top:34px; font-size:12px; color:var(--mut); }
+
+.login-dialog {
+  border:1px solid var(--line); border-radius:14px; background:var(--panel);
+  color:var(--fg); padding:26px; width:min(92vw, 360px);
+}
+.login-dialog::backdrop { background:rgba(0,0,0,.45); }
+.login-dialog h1 { margin:0 0 4px; font-size:17px; }
+.login-dialog p { margin:0 0 18px; color:var(--mut); font-size:13px; }
+.login-dialog label { display:block; font-size:12px; color:var(--mut); margin:12px 0 5px; }
+.login-dialog input { width:100%; }
+.dialog-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
+
+/* §13: shown under the visitor widget, before anything is said. */
+.notice {
+  margin:0; padding:9px 14px; border-top:1px solid var(--line);
+  font-size:11px; color:var(--mut); line-height:1.45;
+}

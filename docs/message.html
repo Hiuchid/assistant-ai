@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leave a message</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body class="centred">
+<div class="app">
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>Leave a message</h1>
+    <button type="button" id="mic" class="icon" aria-pressed="false"
+            title="Talk instead of typing">🎤</button>
+    <button type="button" id="mute" class="icon" aria-pressed="false"
+            title="Mute the voice">🔊</button>
+    <span class="state" id="state">connecting…</span>
+  </header>
+  <div id="log" role="log" aria-live="polite"></div>
+  <form id="form" class="composer" autocomplete="off">
+    <input type="text" id="input" placeholder="Type your message…" disabled
+           aria-label="Your message" maxlength="4000">
+    <button type="submit" id="send" class="primary" disabled>Send</button>
+  </form>
+  <!-- §13: visitors are told what happens to what they say, before they say it. -->
+  <p class="notice">
+    Messages are recorded and passed to the person you're contacting.
+    Transcripts are deleted after 90 days.
+  </p>
+</div>
+
+<script type="module">
+import { startWidget } from "./js/widget.js";
+
+// Visitor mode: no session token, so the server keeps this a visitor
+// conversation. Mode is derived server-side from verified auth and there is no
+// field a client can set to change it.
+startWidget({
+  wsUrl: "wss://assistant-ai.duckdns.org/ws/chat",
+  tokenKey: "assistant.resume.visitor",
+  consentNotice:
+    "This will record what you say and send it for transcription so a message " +
+    "can be taken. Transcripts are deleted after 90 days.\n\nContinue?",
+  el: {
+    log: document.getElementById("log"),
+    input: document.getElementById("input"),
+    send: document.getElementById("send"),
+    form: document.getElementById("form"),
+    dot: document.getElementById("dot"),
+    state: document.getElementById("state"),
+    mic: document.getElementById("mic"),
+    mute: document.getElementById("mute"),
+  },
+});
+</script>
+</body>
+</html>

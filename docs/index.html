@@ -3,48 +3,169 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Leave a message</title>
+<title>Assistant</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
-<body class="centred">
-<div class="app">
-  <header>
-    <span class="dot" id="dot"></span>
-    <h1>Leave a message</h1>
-    <button type="button" id="mic" class="icon" aria-pressed="false"
-            title="Talk instead of typing">🎤</button>
-    <button type="button" id="mute" class="icon" aria-pressed="false"
-            title="Mute the voice">🔊</button>
-    <span class="state" id="state">connecting…</span>
-  </header>
-  <div id="log" role="log" aria-live="polite"></div>
-  <form id="form" class="composer" autocomplete="off">
-    <input type="text" id="input" placeholder="Type your message…" disabled
-           aria-label="Your message" maxlength="4000">
-    <button type="submit" id="send" class="primary" disabled>Send</button>
-  </form>
+<body>
+
+<div class="landing">
+  <nav class="topbar">
+    <span class="brand">Assistant</span>
+    <span class="spacer"></span>
+    <span class="who" id="who" hidden></span>
+    <button class="chip" id="signIn">Sign in</button>
+    <button class="chip" id="signOut" hidden>Sign out</button>
+  </nav>
+
+  <main class="hero">
+    <h1>Leave a message, or get on with it.</h1>
+    <p class="lede">
+      A voice and text assistant that takes messages when you're not around,
+      and notes when you are.
+    </p>
+
+    <div class="cards">
+      <a class="card" href="message.html">
+        <span class="card-icon">💬</span>
+        <h2>Leave a message</h2>
+        <p>Talk or type. No sign-in needed — this is the page to share.</p>
+        <span class="card-go">Open →</span>
+      </a>
+
+      <a class="card locked" href="assistant.html" data-needs-auth>
+        <span class="card-icon">🎩</span>
+        <h2>Assistant</h2>
+        <p>Your own assistant. Notes, tasks and reminders, by voice or text.</p>
+        <span class="card-go">Open →</span>
+        <span class="card-lock">Sign in required</span>
+      </a>
+
+      <a class="card locked" href="dashboard.html" data-needs-auth>
+        <span class="card-icon">📥</span>
+        <h2>Inbox</h2>
+        <p>Everything the assistant has taken down, from both sides.</p>
+        <span class="card-go">Open →</span>
+        <span class="card-lock">Sign in required</span>
+      </a>
+    </div>
+
+    <p class="status" id="status"></p>
+  </main>
 </div>
 
-<script type="module">
-import { startWidget } from "./js/widget.js";
+<!-- Sign-in is a dialog rather than a page, so landing here and signing in
+     does not cost a navigation. -->
+<dialog id="loginDialog" class="login-dialog">
+  <form id="loginForm" autocomplete="on" method="dialog">
+    <h1>Sign in</h1>
+    <p>Owner access.</p>
+    <label for="email">Email</label>
+    <input type="email" id="email" required autocomplete="username">
+    <label for="password">Password</label>
+    <input type="password" id="password" required autocomplete="current-password">
+    <div class="dialog-actions">
+      <button type="button" class="chip" id="cancelLogin">Cancel</button>
+      <button type="submit" class="primary" id="loginBtn">Sign in</button>
+    </div>
+    <div class="err" id="loginErr" role="alert"></div>
+  </form>
+</dialog>
 
-// Visitor mode: no session token is sent, so the server keeps this a visitor
-// conversation. Mode is derived server-side from verified auth and there is no
-// field a client can set to change it.
-startWidget({
-  wsUrl: "wss://assistant-ai.duckdns.org/ws/chat",
-  tokenKey: "assistant.resume.visitor",
-  el: {
-    log: document.getElementById("log"),
-    input: document.getElementById("input"),
-    send: document.getElementById("send"),
-    form: document.getElementById("form"),
-    dot: document.getElementById("dot"),
-    state: document.getElementById("state"),
-    mic: document.getElementById("mic"),
-    mute: document.getElementById("mute"),
-  },
+<script type="module">
+const API = "https://assistant-ai.duckdns.org";
+const SESSION_KEY = "assistant.session";
+
+const $ = (id) => document.getElementById(id);
+const dialog = $("loginDialog");
+
+function token() {
+  try { return sessionStorage.getItem(SESSION_KEY) || ""; } catch { return ""; }
+}
+
+function paint() {
+  const signedIn = Boolean(token());
+  $("signIn").hidden = signedIn;
+  $("signOut").hidden = !signedIn;
+  $("who").hidden = !signedIn;
+  for (const card of document.querySelectorAll("[data-needs-auth]")) {
+    card.classList.toggle("locked", !signedIn);
+  }
+}
+
+// The locked cards are still real links -- each page has its own sign-in, so
+// following one without a session is a detour rather than a dead end. The
+// dialog is only a shortcut.
+for (const card of document.querySelectorAll("[data-needs-auth]")) {
+  card.addEventListener("click", (e) => {
+    if (token()) return;
+    e.preventDefault();
+    dialog.returnValue = card.getAttribute("href");
+    dialog.showModal();
+  });
+}
+
+$("signIn").addEventListener("click", () => {
+  dialog.returnValue = "";
+  dialog.showModal();
 });
+
+$("signOut").addEventListener("click", () => {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+  $("status").textContent = "Signed out.";
+  paint();
+});
+
+$("cancelLogin").addEventListener("click", () => dialog.close(""));
+
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("loginErr");
+  err.textContent = "";
+  $("loginBtn").disabled = true;
+  const destination = dialog.returnValue;
+  try {
+    const res = await fetch(`${API}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("email").value, password: $("password").value }),
+    });
+    if (!res.ok) {
+      // The server returns the same 401 for unknown email and wrong password,
+      // so there is nothing more specific to say here either.
+      err.textContent = res.status === 429
+        ? "Too many attempts. Wait a minute."
+        : "Those details were not accepted.";
+      return;
+    }
+    const { token: t } = await res.json();
+    try { sessionStorage.setItem(SESSION_KEY, t); } catch { /* private mode */ }
+    dialog.close("");
+    paint();
+    // If they were headed somewhere, take them there rather than dropping them
+    // back on the landing page to click twice.
+    if (destination) location.href = destination;
+    else $("status").textContent = "Signed in.";
+  } catch {
+    err.textContent = "Could not reach the server.";
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+});
+
+// Show whether the backend is actually up, so a dead service is obvious here
+// rather than three clicks later.
+(async () => {
+  try {
+    const r = await fetch(`${API}/health`);
+    if (!r.ok) throw new Error();
+    const h = await r.json();
+    $("status").textContent = `Service up · v${h.version}`;
+  } catch {
+    $("status").textContent = "The assistant is not reachable right now.";
+  }
+})();
+
+paint();
 </script>
 </body>
 </html>
