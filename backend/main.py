@@ -11,6 +11,7 @@ and auth (Phase 4.5).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,8 +21,8 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
-from .config import Settings, get_settings
-from .degraded import DegradedCapture
+from .config import OWNER_VOICE, VISITOR_VOICE, Settings, get_settings
+from .degraded import ALL_FIXED_LINES, DegradedCapture
 from .logging_setup import conversation_id_var, setup_logging
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT
 from .providers.llm import (
@@ -31,7 +32,14 @@ from .providers.llm import (
     StreamInterrupted,
     Token,
 )
+from .providers.tts.base import Audio, TTSBackend, TTSUnavailable, VoiceProfile
+from .providers.tts.cache import AudioCache
+from .providers.tts.edge import EdgeTTS
+from .providers.tts.engine import TTSEngine
+from .providers.tts.fish import FishAudioTTS
+from .providers.tts.piper import PiperTTS
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
+from .sentences import SentenceSplitter
 from .session import Conversation, SessionStore
 
 VERSION: Final = "0.2.0"
@@ -54,6 +62,42 @@ messages_limiter = MessageRateLimiter(per_minute=settings.ws_max_messages_per_mi
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ladder = GroqLadder(settings)
+
+    # Chain in descending quality, ascending reliability (§4). Fish is skipped
+    # entirely when no key is configured, so the service still speaks.
+    backends: list[TTSBackend] = []
+    fish: FishAudioTTS | None = None
+    if settings.fish_api_key:
+        fish = FishAudioTTS(
+            settings.fish_api_key,
+            model=settings.fish_model,
+            timeout_s=settings.fish_timeout_s,
+            user_agent=settings.user_agent,
+        )
+        backends.append(fish)
+    else:
+        log.warning("no fish_api_key configured; TTS chain starts at edge-tts")
+    backends.append(EdgeTTS())
+    backends.append(
+        PiperTTS(
+            binary=settings.piper_binary,
+            model=settings.piper_model,
+            timeout_s=settings.piper_timeout_s,
+        )
+    )
+    app.state.fish = fish
+    app.state.tts = TTSEngine(
+        backends=backends,
+        cache=AudioCache(settings.tts_cache_dir, settings.tts_cache_max_bytes),
+        failure_threshold=settings.tts_breaker_failures,
+        cooldown_s=settings.tts_breaker_cooldown_s,
+        force_backend=settings.tts_force_backend,
+    )
+    # §7.2: pre-render the fixed phrases so they cost nothing at call time, and
+    # pin them so they survive eviction. This matters far more now that the
+    # primary backend takes ~2s. Backgrounded -- a cold cache is slower, not
+    # broken, and blocking startup on a third party would be daft.
+    warm = asyncio.create_task(_warm_all(app))
     sweeper = asyncio.create_task(_evict_idle_sessions())
     log.info(
         "service started",
@@ -68,7 +112,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         sweeper.cancel()
+        warm.cancel()
         await app.state.ladder.aclose()
+        if app.state.fish is not None:
+            await app.state.fish.aclose()
+
+
+async def _warm_all(app: FastAPI) -> None:
+    """Pre-render the fixed phrases in both voices.
+
+    Owner and visitor use different voices, so the same line is two distinct
+    cache entries. Both are pinned -- the degraded script must be instant in
+    either mode, since it only runs when everything else has already failed.
+    """
+    for profile in (VISITOR_VOICE, OWNER_VOICE):
+        await app.state.tts.warm(ALL_FIXED_LINES, profile)
 
 
 async def _evict_idle_sessions() -> None:
@@ -221,9 +279,39 @@ async def _say(
     text = " ".join(lines)
     conversation.add("agent", text)
     await websocket.send_json({"type": "token", "text": text})
+
+    # These are the pre-rendered, pinned fixed phrases, so this is a cache
+    # hit and costs nothing -- which is the point, since the degraded path
+    # only runs when everything else has already failed.
+    profile = _voice_for(conversation)
+    for line in lines:
+        try:
+            audio = await websocket.app.state.tts.synthesize(line, profile)
+        except TTSUnavailable as e:
+            log.error("degraded line could not be spoken",
+                      extra={"error": str(e)[:200]})
+            continue
+        await websocket.send_json(
+            {
+                "type": "audio",
+                "seq": 0,
+                "mime": audio.mime,
+                "data": base64.b64encode(audio.data).decode("ascii"),
+            }
+        )
+
     await websocket.send_json(
         {"type": "done", "model": model, "first_token_ms": 0, "total_ms": 0}
     )
+
+
+def _voice_for(conversation: Conversation) -> VoiceProfile:
+    """§1: owner and visitor hear different voices.
+
+    Mode is set server-side from verified auth (§3.7), never from the
+    client, so this cannot be steered by a caller asking nicely.
+    """
+    return OWNER_VOICE if conversation.mode == "owner" else VISITOR_VOICE
 
 
 async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str) -> None:
@@ -244,12 +332,37 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
 
     reply: list[str] = []
     ladder: GroqLadder = websocket.app.state.ladder
+    splitter = SentenceSplitter()
+
+    # §7.1 + §7.14: synthesis runs concurrently with generation so the first
+    # sentence is already being spoken while the LLM writes the second, but
+    # audio is *sent* strictly in submission order. Without the queue, a short
+    # sentence -- or a cache hit racing a cache miss -- overtakes a long one and
+    # the reply plays out of order.
+    audio_queue: asyncio.Queue[asyncio.Task[Audio] | None] = asyncio.Queue()
+    sender = asyncio.create_task(_send_audio_in_order(websocket, audio_queue))
+
+    profile = _voice_for(conversation)
+
+    def speak(sentence: str) -> None:
+        audio_queue.put_nowait(
+            asyncio.create_task(
+                websocket.app.state.tts.synthesize(sentence, profile)
+            )
+        )
+
     try:
         async for event in ladder.stream(conversation.messages()):
             if isinstance(event, Token):
                 reply.append(event.text)
                 await websocket.send_json({"type": "token", "text": event.text})
+                for sentence in splitter.feed(event.text):
+                    speak(sentence)
             elif isinstance(event, Completed):
+                # The final sentence has no trailing whitespace, so it never
+                # matched a boundary -- this is how it gets spoken.
+                if tail := splitter.flush():
+                    speak(tail)
                 conversation.add("agent", "".join(reply))
                 await websocket.send_json(
                     {
@@ -274,4 +387,49 @@ async def _handle_turn(websocket: WebSocket, *, conversation_id: str, text: str)
             conversation.add("agent", "".join(reply), cancelled=True)
         await websocket.send_json(
             {"type": "error", "message": "That reply got cut off. Say that again?"}
+        )
+    finally:
+        # Closes the queue on every path, including the exception ones, so the
+        # sender task can never outlive the turn that created it.
+        audio_queue.put_nowait(None)
+        await sender
+
+
+async def _send_audio_in_order(
+    websocket: WebSocket, queue: asyncio.Queue[asyncio.Task[Audio] | None]
+) -> None:
+    """Await synthesis tasks in submission order and forward the audio.
+
+    Order is the whole point (§7.14). Awaiting each task in turn means a
+    sentence that finishes early waits its turn rather than jumping the queue.
+
+    Audio is base64 inside the JSON frame rather than a separate binary frame:
+    a third of extra bytes on a ~40 KB sentence is nothing next to keeping the
+    sequence number and the payload atomically together.
+    """
+    seq = 0
+    while True:
+        task = await queue.get()
+        if task is None:
+            return
+        seq += 1
+        try:
+            audio = await task
+        except TTSUnavailable as e:
+            # Both backends failed. The text already reached the client, so the
+            # turn is not lost -- it is simply silent.
+            log.error(
+                "synthesis failed for sentence",
+                extra={"seq": seq, "error": str(e)[:200]},
+            )
+            continue
+        except asyncio.CancelledError:
+            raise
+        await websocket.send_json(
+            {
+                "type": "audio",
+                "seq": seq,
+                "mime": audio.mime,
+                "data": base64.b64encode(audio.data).decode("ascii"),
+            }
         )

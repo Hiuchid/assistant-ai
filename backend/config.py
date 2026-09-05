@@ -9,10 +9,13 @@ that lies about what it needs is worse than one that fails fast.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from .providers.tts.base import Prosody, VoiceProfile
 
 ReasoningEffort = Literal["low", "medium", "high"]
 
@@ -77,6 +80,39 @@ DEFAULT_LADDER: tuple[LadderRung, ...] = (
 )
 
 
+# §1 gives owner and visitor modes different voices, chosen by ear in Phase 2.
+#
+# No pitch shifting: it made edge-tts sound robotic, and measurement showed why
+# -- each -4Hz of parameter moves real F0 by only ~2.2Hz, so reaching a properly
+# deep voice needs roughly -56Hz, far past where the artefacts start. Rate is a
+# time-stretch and does not touch timbre, so -8% is safe.
+#
+# Voice ids are per backend and not interchangeable. The chain can move
+# synthesis between backends at any time, so every profile names one for each.
+OWNER_VOICE = VoiceProfile(
+    label="owner",
+    voices={
+        # Community Jarvis model. A third-party clone of a real actor's voice,
+        # used here for a private assistant only -- which is why visitor mode
+        # below deliberately uses a generic voice instead.
+        "fish": "14129c3e320149449d6bada6862f7338",
+        "edge": "en-GB-RyanNeural",
+        "piper": "",  # single-voice backend; the model file is the voice
+    },
+    prosody=Prosody(rate="-8%"),
+)
+
+VISITOR_VOICE = VoiceProfile(
+    label="visitor",
+    voices={
+        "fish": "2e5038d2022e4e4a89142dddae45a284",  # "Elderly British Butler"
+        "edge": "en-GB-ThomasNeural",
+        "piper": "",
+    },
+    prosody=Prosody(rate="-8%"),
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -131,6 +167,30 @@ class Settings(BaseSettings):
     # How long a conversation may sit idle before its in-memory state is
     # dropped. Phase 4 replaces this with the database + sweeper.
     session_idle_timeout_s: int = 900
+
+    # ---- Phase 2: TTS ----
+    # Optional, unlike the Groq key. Absent, the Fish backend is simply not
+    # added to the chain and synthesis starts at edge-tts -- the service still
+    # boots and still speaks. This is "no default for a secret" (§3.4), not a
+    # placeholder: None means genuinely absent.
+    fish_api_key: str | None = None
+    fish_model: str = "s2.1-pro-free"
+    fish_timeout_s: float = 30.0
+
+    tts_cache_dir: Path = Path("audio_cache")
+    # 100 GB of disk is available; 2 GB is far more than the fixed phrases plus
+    # a long tail of repeats will ever need (§4).
+    tts_cache_max_bytes: int = 2 * 1024 * 1024 * 1024
+
+    # Automatic, not manual (§4). This flag is for forcing a backend during
+    # benchmarking only -- the circuit breaker is what protects production.
+    tts_force_backend: str | None = None
+    tts_breaker_failures: int = 3
+    tts_breaker_cooldown_s: float = 300.0
+
+    piper_binary: Path = Path(".venv/bin/piper")
+    piper_model: Path = Path("voices/en_GB-alan-medium.onnx")
+    piper_timeout_s: float = 60.0
 
     @field_validator("allowed_origins", "trusted_proxies", mode="before")
     @classmethod
