@@ -21,6 +21,7 @@ without it would need the pooler and a different username format.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Self
@@ -211,6 +212,53 @@ class Store:
         await self.pool.execute(
             "update users set last_login_at = now() where id = $1::uuid", user_id
         )
+
+    # ------------------------------------------------------------- tickets
+
+    async def conversation_meta(self, conversation_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            select mode, channel, degraded, status
+              from conversations
+             where id = $1::uuid
+            """,
+            conversation_id,
+        )
+        return dict(row) if row else None
+
+    async def insert_ticket(
+        self,
+        conversation_id: str,
+        *,
+        mode: Mode,
+        type: str,
+        title: str,
+        summary: str,
+        intent: str | None,
+        action_items: list[str],
+        urgency: str,
+        contact: dict[str, str],
+        requested_slot: str | None,
+    ) -> bool:
+        """Insert the item. False means one already existed.
+
+        §9 asks for idempotency. `on conflict do nothing` against the unique
+        constraint is what provides it -- checking first would lose the race
+        between session-end and the sweeper, which genuinely happens.
+        """
+        row = await self.pool.fetchrow(
+            """
+            insert into tickets (conversation_id, mode, type, title, summary,
+                                 intent, action_items, urgency, contact,
+                                 requested_slot)
+            values ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
+            on conflict (conversation_id) do nothing
+            returning id
+            """,
+            conversation_id, mode, type, title, summary, intent,
+            json.dumps(action_items), urgency, json.dumps(contact), requested_slot,
+        )
+        return row is not None
 
     # ------------------------------------------------------------ sweeping
 

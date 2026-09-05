@@ -47,6 +47,7 @@ from .providers.tts.piper import PiperTTS
 from .ratelimit import ConnectionLimiter, MessageRateLimiter
 from .sentences import SentenceSplitter
 from .session import Conversation, SessionStore, Turn
+from .summarize import Summarizer, draft_from_degraded
 
 VERSION: Final = "0.2.0"
 
@@ -178,6 +179,34 @@ async def _evict_idle_sessions() -> None:
         # we cannot see, and this is the only view of how close we are to the
         # degraded path.
         log.info("quota", extra={"remaining": app.state.ladder.ledger.snapshot()})
+        await _sweep_stale_conversations()
+
+
+async def _sweep_stale_conversations() -> None:
+    """Summarise conversations whose socket never closed cleanly (§9).
+
+    A hung socket never fires the close handler, so without this the message
+    sits in the database forever and no item is ever generated from it.
+    """
+    store: Store | None = app.state.store
+    if store is None:
+        return
+    try:
+        stale = await store.stale_conversations(settings.inactivity_minutes)
+        if not stale:
+            return
+        log.info("sweeping stale conversations", extra={"count": len(stale)})
+        summarizer = Summarizer(store, app.state.ladder)
+        for conversation_id in stale:
+            try:
+                await summarizer.run(conversation_id)
+            except Exception as e:
+                log.error(
+                    "sweep failed for one conversation",
+                    extra={"error": repr(e)},
+                )
+    except Exception as e:
+        log.error("sweep query failed", extra={"error": repr(e)})
 
 
 app = FastAPI(
@@ -423,6 +452,9 @@ async def ws_chat(websocket: WebSocket) -> None:
         if holds_voice_slot:
             voice_sessions.release(ip)
         connections.release(ip)
+        # §9: generate the item on socket close. Done before dropping the
+        # in-memory session, because the degraded capture lives there.
+        await _finalise(websocket.app, conversation)
         sessions.drop(conversation.id)
 
 
@@ -538,6 +570,36 @@ async def _persist_turn(
             "turn not persisted -- transcript now has a gap",
             extra={"role": role, "error": repr(e)},
         )
+
+
+async def _finalise(app: FastAPI, conversation: Conversation) -> None:
+    """Turn a finished conversation into exactly one item (§9).
+
+    Safe to call twice: the unique constraint on tickets.conversation_id is
+    what makes it idempotent, so this racing the sweeper is fine.
+    """
+    store: Store | None = app.state.store
+    if store is None or conversation.db_id is None:
+        return  # nothing was recorded, so there is nothing to summarise
+
+    try:
+        if conversation.degraded is not None:
+            # No model was available during the call, so do not ask for one
+            # now. The scripted interview already has the fields.
+            await store.mark_degraded(conversation.db_id)
+            await store.insert_ticket(
+                conversation.db_id,
+                mode=conversation.mode,
+                **draft_from_degraded(conversation.degraded),
+            )
+            await store.end_conversation(conversation.db_id)
+            log.info("degraded item written")
+            return
+        await Summarizer(store, app.state.ladder).run(conversation.db_id)
+    except Exception as e:
+        # A conversation that cannot be summarised must not take the socket
+        # teardown down with it.
+        log.error("finalise failed", extra={"error": repr(e)}, exc_info=e)
 
 
 def _report_turn_failure(task: asyncio.Task[None]) -> None:

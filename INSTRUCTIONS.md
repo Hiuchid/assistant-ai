@@ -990,6 +990,30 @@ malformed LLM response still produces a fallback item; firing session-end and th
 simultaneously still produces exactly one; and owner and visitor conversations produce
 appropriately-typed items.
 
+**[r5] ✅ DONE 2026-09-05.** All four criteria verified live:
+
+- A visitor conversation produced `type='request'`, `urgency='high'` correctly inferred,
+  `requested_slot='Thursday morning'` kept **verbatim rather than converted to a date**,
+  all four contact fields extracted, and two sensible action items.
+- An owner conversation produced `type='reminder'` — an owner-side type, which a visitor
+  conversation cannot produce and vice versa (`_coerce_type` constrains it to the mode
+  whatever the model returns).
+- Two concurrent `Summarizer.run()` calls on the same conversation both returned `False`
+  and left exactly one row. Idempotency comes from `on conflict do nothing` against the
+  unique constraint, **not** from checking first — session-end and the sweeper genuinely
+  race and a pre-check loses.
+- Malformed output is retried once, then written as `type='other'` with the raw
+  transcript. 23 new tests (89 total) cover JSON buried in prose, numeric phone numbers,
+  a string where a list was asked for, and null contact values.
+
+**[r5] Two things worth knowing:**
+
+- **Cancelled turns are marked, not dropped.** Barge-in means the caller replied to a
+  half-spoken sentence; removing it makes the exchange read as a non-sequitur.
+- **The transcript is wrapped in delimiters and labelled as data, not instructions.**
+  Costs nothing now and establishes the habit for Phase 7, where these items reach an
+  agent with shell access.
+
 ### Phase 6 — Dashboard and ops
 
 Operator page with the ticket list and a Realtime subscription. **[r3]** Auth already exists
