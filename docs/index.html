@@ -267,6 +267,7 @@ form.addEventListener("submit", (e) => {
   setComposerEnabled(false);
 });
 
+const mute = $("mute");
 mute.addEventListener("click", () => {
   muted = !muted;
   mute.textContent = muted ? "🔇" : "🔊";
@@ -408,6 +409,8 @@ micBtn.addEventListener("click", async () => {
   }
 });
 
-const mute = $("mute");
+
+connect();
+</script>
 </body>
 </html>
