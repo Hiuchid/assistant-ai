@@ -1105,6 +1105,8 @@ function signOut() {
 function launch(t) {
   token = t;
   if ($("loginDialog").open) $("loginDialog").close();
+  // The app is not in the page until there is a session to view it with.
+  $("shell").hidden = false;
   show("today");
   refresh();
   poll = setInterval(refresh, POLL_MS);
@@ -1167,14 +1169,31 @@ $("refreshBtn").addEventListener("click", refresh);
 $("signOutBtn").addEventListener("click", signOut);
 $("settingsSignOut").addEventListener("click", signOut);
 
-// The dialog cannot be dismissed: there is nothing to look at behind it
-// without a session, so Escape or a backdrop click just reopens it.
+// Two layers, because one was not enough.
+//
+// preventDefault on `cancel` stops Escape closing the dialog, but it does not
+// stop everything: Android's back gesture dismisses a modal dialog anyway, and
+// what was behind it was the whole app, rendered and interactive. It showed
+// nothing real -- every request needs the token the server checks -- but a
+// signed-out person could still page through empty modules, which is not what
+// a login screen is for.
+//
+// So the shell is not in the page at all until there is a session, and the
+// dialog reopens if it is ever dismissed without one.
 $("loginDialog").addEventListener("cancel", (e) => {
   e.preventDefault();
 });
+$("loginDialog").addEventListener("close", () => {
+  if (!token) requireLogin();
+});
+
+function requireLogin() {
+  $("shell").hidden = true;
+  if (!$("loginDialog").open) $("loginDialog").showModal();
+}
 
 registerServiceWorker();
 
 const existing = read(SESSION_KEY);
 if (existing) launch(existing);
-else $("loginDialog").showModal();
+else requireLogin();
