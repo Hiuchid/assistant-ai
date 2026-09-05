@@ -1131,7 +1131,24 @@ Groq-only decision means no provider trains on any of it.
   a nightly delete job.
 - **A deletion path** if someone asks.
 
-Not blocking any phase. Worth doing before the visitor widget is shared with anyone.
+**[r5] ✅ ALL THREE DONE 2026-09-05.**
+
+- **Consent.** The microphone is gated behind an explicit acknowledgement the first time,
+  remembered per tab rather than forever — consent that silently persists across sessions
+  is not much of a consent. `message.html` also carries a standing notice.
+- **Retention.** `scripts/retention.py`, nightly at 03:42. Deletes turns from *ended*
+  conversations past 90 days — turns only, so the item survives: who called and what they
+  wanted is kept while the verbatim record of how they said it is not. Verified against an
+  artificially aged conversation: transcript gone, item intact.
+  **The 90 days is a promise printed on the widget.** Changing `RETENTION_TRANSCRIPT_DAYS`
+  means changing that notice too.
+  Whole-conversation purge exists but is **off by default** (`RETENTION_ITEM_DAYS=0`) —
+  silently deleting the owner's own reminders is a worse failure than keeping them.
+- **Deletion path.** `scripts/forget.py "<name, phone or email>"`. Dry run by default;
+  `--delete` requires typing the match count to confirm, which cannot be satisfied by
+  holding Enter the way "yes" can. The search deliberately spans contact details, item
+  titles and raw transcripts: on an erasure request, missing a row is worse than showing
+  one extra to a human who is about to confirm.
 
 ---
 

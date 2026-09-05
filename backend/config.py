@@ -216,6 +216,21 @@ class Settings(BaseSettings):
     inactivity_minutes: int = 5
     sweep_interval_s: int = 60
 
+    # ---- Retention (§13) ----
+    # The visitor widget promises "transcripts are deleted after 90 days".
+    # This is what keeps that promise, so changing it means changing the
+    # notice on message.html too.
+    #
+    # Turns only: the item built from them survives, so the record of who
+    # called and what they wanted is kept while the verbatim recording of how
+    # they said it is not.
+    retention_transcript_days: int = 90
+
+    # Whole conversations, and the items with them (cascade). 0 disables it.
+    # Off by default: silently deleting the owner's own reminders would be a
+    # worse failure than keeping them too long.
+    retention_item_days: int = 0
+
     # ---- Web Push ----
     # Self-generated VAPID pair; no account and no third party. The public key
     # is served to the browser and is meant to be public. Absent, reminders

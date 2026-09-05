@@ -402,6 +402,73 @@ class Store:
             "update tickets set notified_at = now() where id = $1::uuid", ticket_id
         )
 
+    # ---------------------------------------------------------- retention
+
+    async def purge_old_transcripts(self, older_than_days: int) -> int:
+        """Delete turns from finished conversations past the retention window.
+
+        Only the turns. The item built from them survives, so who called and
+        what they wanted is kept while the verbatim record of how they said it
+        is not -- which is what the notice on the visitor widget promises.
+
+        Restricted to ended conversations so a long-running one is never
+        truncated underneath itself.
+        """
+        result = await self.pool.execute(
+            """
+            delete from turns
+             where conversation_id in (
+                   select id from conversations
+                    where ended_at is not null
+                      and ended_at < now() - ($1 || ' days')::interval
+             )
+            """,
+            str(older_than_days),
+        )
+        return int(result.split()[-1]) if result.startswith("DELETE") else 0
+
+    async def purge_old_conversations(self, older_than_days: int) -> int:
+        """Delete whole conversations, cascading to turns and items."""
+        result = await self.pool.execute(
+            """
+            delete from conversations
+             where ended_at is not null
+               and ended_at < now() - ($1 || ' days')::interval
+            """,
+            str(older_than_days),
+        )
+        return int(result.split()[-1]) if result.startswith("DELETE") else 0
+
+    async def find_conversations_for(self, needle: str) -> list[dict[str, Any]]:
+        """Everything matching a person, for an erasure request.
+
+        Searches the item's contact blob and title, and the raw transcript.
+        Deliberately broad: missing a row on a deletion request is worse than
+        showing one row too many to a human who is about to confirm.
+        """
+        rows = await self.pool.fetch(
+            """
+            select distinct c.id::text as id, c.mode, c.channel, c.started_at,
+                   t.title, t.contact
+              from conversations c
+              left join tickets t on t.conversation_id = c.id
+              left join turns tn on tn.conversation_id = c.id
+             where c.id::text = $1
+                or t.contact::text ilike '%' || $1 || '%'
+                or t.title ilike '%' || $1 || '%'
+                or tn.text ilike '%' || $1 || '%'
+             order by c.started_at desc
+            """,
+            needle,
+        )
+        return [dict(r) for r in rows]
+
+    async def delete_conversations(self, ids: list[str]) -> int:
+        result = await self.pool.execute(
+            "delete from conversations where id = any($1::uuid[])", ids
+        )
+        return int(result.split()[-1]) if result.startswith("DELETE") else 0
+
     # ------------------------------------------------------------ sweeping
 
     async def stale_conversations(self, idle_minutes: int) -> list[str]:
