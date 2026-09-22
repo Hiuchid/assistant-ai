@@ -49,6 +49,7 @@ from .logging_setup import conversation_id_var, setup_logging
 from .notify import Notifier
 from .persistence import Store
 from .prompts.owner import OWNER_SYSTEM_PROMPT
+from .prompts.portfolio import PORTFOLIO_SYSTEM_PROMPT, portfolio_prompt
 from .prompts.visitor import VISITOR_SYSTEM_PROMPT, visitor_prompt
 from .prompts.visitor_ar import arabic_visitor_prompt
 from .providers.llm import (
@@ -672,6 +673,34 @@ async def set_briefing(
     return {"ok": True, "briefing": text}
 
 
+class ProfileIn(BaseModel):
+    profile: str
+
+
+@app.get("/api/profile")
+async def get_profile(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """What the portfolio assistant knows about the owner's work."""
+    _require_session(authorization)
+    return {"profile": await _require_store().get_setting("portfolio_profile")}
+
+
+@app.put("/api/profile")
+async def set_profile(
+    body: ProfileIn,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """Owner-authored, so trusted -- but capped so it cannot crowd out the
+    rules it is appended to. Larger than the briefing because a CV is longer
+    than a standing instruction."""
+    _require_session(authorization)
+    text = body.profile.strip()[:4000]
+    await _require_store().set_setting("portfolio_profile", text)
+    log.info("profile updated", extra={"chars": len(text)})
+    return {"ok": True, "profile": text}
+
+
 @app.post("/api/items/{ticket_id}/archive")
 async def archive_item(
     ticket_id: str,
@@ -915,8 +944,19 @@ async def ws_chat(websocket: WebSocket) -> None:
         await websocket.close(code=WS_POLICY_VIOLATION, reason=refusal)
         return
 
+    # Chosen by the client because it grants nothing: a register is not a
+    # privilege, unlike `mode`, which is derived from a verified session and
+    # has no field in the protocol at all. Anything unrecognised is the
+    # secretary, so a typo degrades to the safer of the two.
+    persona = (
+        "portfolio"
+        if websocket.query_params.get("persona") == "portfolio"
+        else "secretary"
+    )
+
     await websocket.accept()
-    conversation = sessions.create(await _visitor_system_prompt())
+    conversation = sessions.create(await _visitor_system_prompt(persona))
+    conversation.persona = persona  # type: ignore[assignment]
     conversation_id_var.set(conversation.id)
     log.info("ws connected", extra={"client_ip": ip})
 
@@ -1293,21 +1333,28 @@ async def _say(
     )
 
 
-async def _visitor_system_prompt() -> str:
-    """The secretary prompt plus whatever standing instructions are set.
+async def _visitor_system_prompt(persona: str = "secretary") -> str:
+    """The visitor prompt for this front door, plus what the owner has set.
 
-    Read per connection rather than cached: the owner edits this to say things
+    Read per connection rather than cached: the owner edits these to say things
     like "I am away until the 15th", and a cache would keep telling callers the
     old thing until the process restarted.
+
+    The portfolio persona additionally carries a written profile of the owner's
+    work. It is loaded here for the same reason -- a CV changes, and a stale
+    one is worse than none.
     """
     store: Store | None = app.state.store
     if store is None:
-        return VISITOR_SYSTEM_PROMPT
+        return PORTFOLIO_SYSTEM_PROMPT if persona == "portfolio" else VISITOR_SYSTEM_PROMPT
     try:
-        return visitor_prompt(await store.get_setting("visitor_briefing"))
+        briefing = await store.get_setting("visitor_briefing")
+        if persona == "portfolio":
+            return portfolio_prompt(briefing, await store.get_setting("portfolio_profile"))
+        return visitor_prompt(briefing)
     except Exception as e:
         log.error("could not load briefing", extra={"error": repr(e)})
-        return VISITOR_SYSTEM_PROMPT
+        return PORTFOLIO_SYSTEM_PROMPT if persona == "portfolio" else VISITOR_SYSTEM_PROMPT
 
 
 def _voice_for(conversation: Conversation) -> VoiceProfile:
@@ -1343,9 +1390,13 @@ async def _set_language(conversation: Conversation, lang: str) -> None:
             briefing = await store.get_setting("visitor_briefing")
         except Exception as e:
             log.error("could not load briefing", extra={"error": repr(e)})
-    conversation.system_prompt = (
-        arabic_visitor_prompt(briefing) if lang == "ar" else visitor_prompt(briefing)
-    )
+    if lang == "ar":
+        # No Levantine Jarvis yet: the Arabic secretary is written and tested,
+        # and a persona translated on the fly would be neither. Falling back is
+        # the honest option, and the rules are identical either way.
+        conversation.system_prompt = arabic_visitor_prompt(briefing)
+    else:
+        conversation.system_prompt = await _visitor_system_prompt(conversation.persona)
     if store is not None and conversation.db_id:
         try:
             await store.set_language(conversation.db_id, lang)

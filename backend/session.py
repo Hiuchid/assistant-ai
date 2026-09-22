@@ -61,6 +61,12 @@ class Conversation:
     # Set from the first utterance Whisper transcribes, or by the
     # widget toggle. Drives the prompt, the voice and the STT hint.
     lang: Literal["en", "ar"] = "en"
+    # Which front door this came through. The message widget gets the plain
+    # secretary; the portfolio site gets Jarvis, who additionally answers
+    # questions about the owner's work from a written profile. Chosen by the
+    # client, which is safe in a way that `mode` is not -- picking a register
+    # grants nothing, so there is no privilege to escalate.
+    persona: Literal["secretary", "portfolio"] = "secretary"
     turns: list[Turn] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)
